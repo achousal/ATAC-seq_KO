@@ -1,0 +1,61 @@
+# Environment and secrets
+.env
+*.env.local
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Data (large files - track separately or use git-lfs)
+data/*
+!data/.gitkeep
+
+# Results/outputs (regenerable)
+results/*
+!results/.gitkeep
+
+# Large bioinformatics files (regenerable)
+*.sam
+*.bam
+*.bai
+*.fastq
+*.fastq.gz
+*.fq
+*.fq.gz
+*.bw
+*.bigwig
+*.bed
+*.bedGraph
+*.narrowPeak
+*.broadPeak
+*.gappedPeak
+
+# Bowtie2 index files
+*.bt2
+*.bt2l
+
+# Log files
+*.log
+*.out
+*.err
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.ipynb_checkpoints/
+
+# R
+.Rhistory
+.Rdata
+.RData
+.Ruserdata
+.Rproj.user/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
