@@ -8,7 +8,7 @@ die(){ echo "ERROR: $*" >&2; exit 1; }
 need(){ command -v "$1" >/dev/null 2>&1 || die "Missing required tool: $1"; }
 
 # ---------------- config (edit if needed) ----------------
-BASE="/sc/arion/projects/Chipuk_Laboratory/chousa01/ATAC-seq/ATF5_KO"
+BASE="/sc/arion/projects/Chipuk_Laboratory/chousa01/ATAC-seq_KO/analysis/atacseq_analysis.sh"
 MACS="${BASE}/analysis/macs"
 DESEQ="${BASE}/analysis/subread/deseq/DA_results_DESeq2.csv"
 GTF="${BASE}/raw/gencode.vM25.annotation.gtf"

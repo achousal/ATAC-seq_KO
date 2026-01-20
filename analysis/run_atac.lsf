@@ -6,16 +6,16 @@
 #BSUB -R "span[hosts=1]"
 #BSUB -W 24:00
 #BSUB -R "rusage[mem=4000]"
-#BSUB -o /sc/arion/projects/Chipuk_Laboratory/chousa01/ATAC-seq/ATF5_KO/analysis/logs/%J.out
-#BSUB -e /sc/arion/projects/Chipuk_Laboratory/chousa01/ATAC-seq/ATF5_KO/analysis/logs/%J.err
+#BSUB -o /sc/arion/projects/Chipuk_Laboratory/chousa01/ATAC-seq_KO/analysis/logs/%J.out
+#BSUB -e /sc/arion/projects/Chipuk_Laboratory/chousa01/ATAC-seq_KO/analysis/logs/%J.err
 
 # ATAC-seq Pipeline Submission Script
 # -----------------------------------
 # IMPORTANT: Create log directory before submitting:
-#   mkdir -p /sc/arion/projects/Chipuk_Laboratory/chousa01/ATAC-seq/ATF5_KO/analysis/logs
+#   mkdir -p /sc/arion/projects/Chipuk_Laboratory/chousa01/ATAC-seq_KO/analysis/logs
 #
 # Submit with:
-#   bsub < code/run_atac.lsf
+#   bsub < run_atac.lsf
 
 set -euo pipefail
 
@@ -29,7 +29,7 @@ echo "[LSF] PWD:       $(pwd)"
 echo "========================================"
 
 # Project base
-BASE="/sc/arion/projects/Chipuk_Laboratory/chousa01/ATAC-seq/ATF5_KO"
+BASE="/sc/arion/projects/Chipuk_Laboratory/chousa01/ATAC-seq_KO"
 cd "$BASE"
 
 # Ensure log directory exists (for pipeline log, not LSF logs)
@@ -54,7 +54,7 @@ export LSB_MAX_NUM_PROCESSORS="${LSB_MAX_NUM_PROCESSORS:-8}"
 
 # Run pipeline
 echo "[LSF] Starting ATAC-seq pipeline..."
-bash "${BASE}/code/atacseq_analysis.sh"
+bash "${BASE}/analysis/atacseq_analysis.sh"
 
 # Done
 echo "========================================"

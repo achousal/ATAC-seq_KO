@@ -7,7 +7,7 @@
 # =============================================================================
 
 # Project base directory (where analysis/ and raw/ live)
-export ATAC_BASE="/sc/arion/projects/Chipuk_Laboratory/chousa01/ATAC-seq/ATF5_KO"
+export ATAC_BASE="/sc/arion/projects/Chipuk_Laboratory/chousa01/ATAC-seq_KO"
 
 # Raw FASTQ location
 export ATAC_RAW_FASTQ="/sc/arion/projects/Chipuk_Laboratory/henaoj02/20251107_ATAC_seq_Fibroblasts_WT_vs_ATF5KO/30-1227913735/00_fastq"
