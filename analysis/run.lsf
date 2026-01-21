@@ -1,0 +1,86 @@
+#!/bin/bash
+# =============================================================================
+# run.lsf - LSF submission for ATAC-seq pipeline
+# =============================================================================
+# Submit with: bsub < run.lsf
+#
+# Edit the PIPELINE OPTIONS section below to customize behavior.
+# =============================================================================
+
+#BSUB -P acc_Chipuk_Laboratory
+#BSUB -q premium
+#BSUB -n 8
+#BSUB -W 24:00
+#BSUB -R "rusage[mem=4000]"
+#BSUB -R "span[hosts=1]"
+#BSUB -J ATAC_pipeline
+#BSUB -o /sc/arion/projects/Chipuk_Laboratory/chousa01/ATAC-seq_KO/analysis/logs/%J.out
+#BSUB -e /sc/arion/projects/Chipuk_Laboratory/chousa01/ATAC-seq_KO/analysis/logs/%J.err
+
+# =============================================================================
+# PIPELINE OPTIONS (edit as needed)
+# =============================================================================
+
+# Stages to skip (1 = skip, 0 = run)
+SKIP_ATAC=0
+SKIP_INTEGRATE=0
+SKIP_FIGURES=0
+FORCE=0
+
+# RNA integration files (leave empty to skip integration)
+RNA_DEG_FILE="/sc/arion/projects/Chipuk_Laboratory/henaoj02/20251016_Bulk_RNAseq_Fibroblast_ATF5_WT_vs_KO/BiNGS-Bulk-RNA-seq-pipeline/data_rna/processed/analysis/differential_expression/condition_ATF5KO_vs_WT_degs.csv"
+GTF_FILE="/sc/arion/projects/Chipuk_Laboratory/chousa01/ATAC-seq_KO/raw/gencode.vM25.annotation.gtf"
+
+# =============================================================================
+# ENVIRONMENT
+# =============================================================================
+set -euo pipefail
+
+echo "=========================================="
+echo "ATAC-seq Pipeline - LSF Job"
+echo "Job ID: ${LSB_JOBID:-local}"
+echo "Host: $(hostname)"
+echo "Cores: ${LSB_MAX_NUM_PROCESSORS:-8}"
+echo "Start: $(date)"
+echo "=========================================="
+
+export LSB_MAX_NUM_PROCESSORS="${LSB_MAX_NUM_PROCESSORS:-8}"
+export OMP_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+
+module purge 2>/dev/null || true
+module load anaconda 2>/dev/null || true
+
+if command -v conda >/dev/null 2>&1; then
+    eval "$(conda shell.bash hook)"
+    conda activate csb 2>/dev/null || echo "[WARN] conda env 'csb' not found"
+fi
+
+# =============================================================================
+# RUN
+# =============================================================================
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LOGDIR="${SCRIPT_DIR}/logs"
+mkdir -p "$LOGDIR"
+
+# Build arguments
+ARGS=""
+[[ $SKIP_ATAC -eq 1 ]] && ARGS="$ARGS --skip-atac"
+[[ $SKIP_INTEGRATE -eq 1 ]] && ARGS="$ARGS --skip-integrate"
+[[ $SKIP_FIGURES -eq 1 ]] && ARGS="$ARGS --skip-figures"
+[[ $FORCE -eq 1 ]] && ARGS="$ARGS --force"
+[[ -n "$RNA_DEG_FILE" && -n "$GTF_FILE" ]] && ARGS="$ARGS --rna-deg \"$RNA_DEG_FILE\" --gtf \"$GTF_FILE\""
+
+PIPELOG="${LOGDIR}/${LSB_JOBID:-local}.pipeline.log"
+echo "Pipeline log: $PIPELOG"
+echo "=========================================="
+
+chmod +x "${SCRIPT_DIR}/run.sh"
+eval "bash \"${SCRIPT_DIR}/run.sh\" $ARGS" 2>&1 | tee "$PIPELOG"
+
+EXIT_CODE=${PIPESTATUS[0]}
+echo "=========================================="
+echo "End: $(date)"
+echo "Exit code: $EXIT_CODE"
+echo "=========================================="
+exit $EXIT_CODE
