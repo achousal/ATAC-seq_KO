@@ -59,7 +59,8 @@ fi
 # =============================================================================
 # RUN
 # =============================================================================
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ATAC_BASE="/sc/arion/projects/Chipuk_Laboratory/chousa01/ATAC-seq_KO"
+SCRIPT_DIR="${ATAC_BASE}/analysis"
 LOGDIR="${SCRIPT_DIR}/logs"
 mkdir -p "$LOGDIR"
 
@@ -75,7 +76,6 @@ PIPELOG="${LOGDIR}/${LSB_JOBID:-local}.pipeline.log"
 echo "Pipeline log: $PIPELOG"
 echo "=========================================="
 
-chmod +x "${SCRIPT_DIR}/run.sh"
 eval "bash \"${SCRIPT_DIR}/run.sh\" $ARGS" 2>&1 | tee "$PIPELOG"
 
 EXIT_CODE=${PIPESTATUS[0]}
