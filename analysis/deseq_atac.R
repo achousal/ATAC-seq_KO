@@ -67,9 +67,29 @@ dir.create(out_dir, showWarnings = FALSE, recursive = TRUE)
 # =============================================================================
 message("[DESeq2] Reading featureCounts file: ", fc_file)
 fc <- read.delim(fc_file, comment.char = "#", check.names = FALSE)
+
+# Diagnostic: check column count
+message("[DESeq2] featureCounts columns: ", paste(colnames(fc), collapse = ", "))
+
 peak_ids <- fc$Geneid
 counts <- as.matrix(fc[, -(1:6)])
 rownames(counts) <- peak_ids
+
+# Verify counts matrix is numeric
+if (!is.numeric(counts)) {
+  warning(sprintf("[WARN] Counts matrix has mode '%s', attempting coercion to numeric", mode(counts)))
+  counts <- apply(counts, 2, as.numeric)
+  if (!is.numeric(counts)) {
+    stop(sprintf("[ERROR] Could not coerce counts to numeric. Mode: %s. Check featureCounts output format.",
+                 mode(counts)), call. = FALSE)
+  }
+}
+
+# Verify we have samples
+if (ncol(counts) == 0) {
+  stop(sprintf("[ERROR] No sample columns found in featureCounts output. Total columns: %d (expected >= 7 for 1+ samples)",
+               ncol(fc)), call. = FALSE)
+}
 
 # Clean sample names (remove path, keep basename without .final.bam)
 samples <- colnames(counts)
@@ -83,34 +103,50 @@ message("[DESeq2] Samples in count matrix: ", paste(samples, collapse = ", "))
 # =============================================================================
 # SAMPLE METADATA
 # =============================================================================
+# Try to read metadata file
+use_metadata <- FALSE
 if (!is.null(meta_file) && file.exists(meta_file)) {
   message("[DESeq2] Reading metadata file: ", meta_file)
   meta <- read_tsv(meta_file, show_col_types = FALSE)
 
-  # Validate metadata has required columns
-  required_cols <- c("sample", "condition")
-  missing_cols <- setdiff(required_cols, colnames(meta))
-  if (length(missing_cols) > 0) {
-    stop(sprintf("[ERROR] Metadata missing required columns: %s",
-                 paste(missing_cols, collapse = ", ")), call. = FALSE)
-  }
+  # Validate metadata is not empty
+  if (nrow(meta) == 0) {
+    warning("[WARN] Metadata file is empty, using pattern-based detection")
+  } else {
+    # Validate metadata has required columns
+    required_cols <- c("sample", "condition")
+    missing_cols <- setdiff(required_cols, colnames(meta))
+    if (length(missing_cols) > 0) {
+      stop(sprintf("[ERROR] Metadata missing required columns: %s",
+                   paste(missing_cols, collapse = ", ")), call. = FALSE)
+    }
 
-  # Match samples in count matrix to metadata
-  matched <- samples %in% meta$sample
-  if (!all(matched)) {
-    missing <- samples[!matched]
-    warning(sprintf("[WARN] Samples not in metadata (using pattern fallback): %s",
-                    paste(missing, collapse = ", ")))
-  }
+    message(sprintf("[DESeq2] Metadata loaded: %d samples", nrow(meta)))
+    use_metadata <- TRUE
 
-  # Build coldata from metadata
-  coldata <- data.frame(sample = samples)
+    # Match samples in count matrix to metadata
+    matched <- samples %in% meta$sample
+    if (!all(matched)) {
+      missing <- samples[!matched]
+      warning(sprintf("[WARN] Samples not in metadata (using pattern fallback): %s",
+                      paste(missing, collapse = ", ")))
+    }
+  }
+} else {
+  message("[DESeq2] No metadata file provided, using pattern-based detection")
+}
+
+# Build coldata from metadata if available, otherwise use patterns
+coldata <- data.frame(sample = samples)
+
+if (use_metadata) {
+  # Match each sample to metadata
   coldata$condition <- sapply(samples, function(s) {
     m <- meta$condition[meta$sample == s]
     if (length(m) == 1) return(m)
     # Fallback to pattern
     if (grepl("ATF5WT", s, ignore.case = TRUE)) return("WT")
-    return("NULL")
+    return("KO")
   })
   coldata$replicate <- sapply(samples, function(s) {
     if ("replicate" %in% colnames(meta)) {
@@ -119,21 +155,18 @@ if (!is.null(meta_file) && file.exists(meta_file)) {
     }
     str_extract(s, "n[0-9]+")
   })
-
 } else {
-  message("[DESeq2] No metadata file provided, using pattern-based detection")
-  # Fallback to pattern-based detection
-  condition <- ifelse(grepl("ATF5WT", samples, ignore.case = TRUE), "WT", "NULL")
-  replicate <- str_extract(samples, "n[0-9]+")
-  coldata <- data.frame(
-    sample = samples,
-    condition = condition,
-    replicate = replicate
-  )
+  # Pattern-based detection (fallback)
+  coldata$condition <- sapply(samples, function(s) {
+    if (grepl("ATF5WT", s, ignore.case = TRUE)) return("WT")
+    if (grepl("ATF5NULL|ATF5KO|KO", s, ignore.case = TRUE)) return("KO")
+    return("KO")  # default to KO if ambiguous
+  })
+  coldata$replicate <- str_extract(samples, "n[0-9]+")
 }
 
-# Convert to factors with explicit levels
-coldata$condition <- factor(coldata$condition, levels = c("WT", "NULL"))
+# Convert to factors with explicit levels (WT vs KO)
+coldata$condition <- factor(coldata$condition, levels = c("WT", "KO"))
 coldata$replicate <- factor(coldata$replicate)
 rownames(coldata) <- samples
 
@@ -168,7 +201,7 @@ dds <- DESeq(dds)
 
 # LFC shrinkage with apeglm
 message("[DESeq2] Shrinking log2 fold changes (apeglm)")
-res <- lfcShrink(dds, coef = "condition_NULL_vs_WT", type = "apeglm")
+res <- lfcShrink(dds, coef = "condition_KO_vs_WT", type = "apeglm")
 
 # =============================================================================
 # SAVE RESULTS
