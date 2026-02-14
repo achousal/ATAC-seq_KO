@@ -309,7 +309,7 @@ if (!"label" %in% names(da) || all(is.na(da$label))) {
 # Select significant peaks to label:
 # label all if few; otherwise keep strongest significant hits (adaptive cap).
 n_sig_total <- sum(da$sig %in% c("Up", "Down"), na.rm = TRUE)
-label_cap <- min(max(30, ceiling(0.25 * n_sig_total)), 100)
+label_cap <- min(max(10, ceiling(0.25 * n_sig_total)), 20)
 da <- da %>% mutate(row_id = row_number())
 sig_for_labels <- da %>%
   filter(sig %in% c("Up", "Down"), !is.na(label), nzchar(label)) %>%
