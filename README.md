@@ -638,7 +638,7 @@ Checks:
 - **Enhancer definition**: Peaks 2kb-50kb from TSS
 - **Gene-level collapse**: Best peak per gene (min padj, tie-break by max abs(log2FC))
 - **Significance threshold**: padj < 0.05 (default, adjustable)
-- **Top genes for labeling**: Top 30 by RNA padj (default, adjustable)
+- **Top genes for labeling**: Up to top 30, prioritizing significant genes across RNA/promoter/enhancer by best padj and effect size (default, adjustable)
 
 ### Reproducibility
 

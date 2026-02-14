@@ -59,3 +59,7 @@ venv/
 .vscode/
 *.swp
 *.swo
+
+# Claude Code and Serena agent state
+.claude/
+.serena/

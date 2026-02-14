@@ -46,6 +46,7 @@ ATAC-seq_KO/
     deseq_atac.R              # DESeq2 differential accessibility analysis
     gene_integration_prep.sh  # Stage 2a: Peak-to-gene mapping (promoter/enhancer)
     rna_atac_figures.R        # Stage 2b: RNA+ATAC integration and correlation plots
+    rna_atac_exploratory.R    # Stage 2c: Exploratory figure panel (hexbin, quadrant, heatmap, etc.)
     validate_outputs.sh       # Output validation and integrity checks
     logs/                     # Pipeline logs (created on first run)
     BINGS/                    # (optional) Additional analysis scripts
@@ -73,7 +74,7 @@ Orchestrated by [analysis/run.sh](analysis/run.sh) with checkpoint logic to skip
 | Stage | Script | Outputs | Can Skip? |
 |-------|--------|---------|-----------|
 | 1. ATAC Processing | [atacseq_analysis.sh](analysis/atacseq_analysis.sh) | BAMs, BigWigs, peaks, DESeq2 | Yes (`--skip-atac`) |
-| 2. RNA+ATAC Integration | [gene_integration_prep.sh](analysis/gene_integration_prep.sh) + [rna_atac_figures.R](analysis/rna_atac_figures.R) | Peak-gene maps, merged tables, correlation plots | Yes (`--skip-integrate`) |
+| 2. RNA+ATAC Integration | [gene_integration_prep.sh](analysis/gene_integration_prep.sh) + [rna_atac_figures.R](analysis/rna_atac_figures.R) + [rna_atac_exploratory.R](analysis/rna_atac_exploratory.R) | Peak-gene maps, merged tables, correlation + exploratory plots | Yes (`--skip-integrate`) |
 | 3. Figure Generation | inline in [run.sh](analysis/run.sh) | Volcano, MA, PCA, heatmaps | Yes (`--skip-figures`) |
 
 **Checkpoint behavior:** Existing outputs are automatically skipped unless `--force` is used.
@@ -111,10 +112,12 @@ Orchestrated by [analysis/run.sh](analysis/run.sh) with checkpoint logic to skip
 
 | Figure | Location |
 |--------|----------|
-| Volcano plot | `results/figures/da/volcano_ATAC_DA.png` |
-| MA plot | `results/figures/da/MA_plot_ATAC_DA.png` |
+| Volcano plot | `results/figures/da/volcano_ATAC_DA.png` (labeled with top 15 up/down genes) |
+| MA plot | `results/figures/da/MA_plot_ATAC_DA.png` (labeled with top 15 up/down genes) |
 | PCA plot | `results/figures/qc/PCA_samples.pdf` |
 | Heatmap | `results/figures/heatmaps/heatmap_all_peaks.pdf` |
+
+**Labeling behavior:** If gene integration has been run, volcano/MA plots label peaks with their nearest gene name. Otherwise, peaks are labeled by their genomic coordinates (e.g., `chr1:1000`).
 
 ### Integration (optional)
 
@@ -123,6 +126,19 @@ Orchestrated by [analysis/run.sh](analysis/run.sh) with checkpoint logic to skip
 | Gene-level merge | `analysis/gene_integration/genelevel_RNA_Prom_Enh_merged.csv` |
 | Correlation plots | `results/figures/integration/Figure{1,2}_threepanel_*.png` |
 | Top DEGs | `analysis/gene_integration/top30_RNA_genes.csv` |
+
+**Exploratory figures** (from [rna_atac_exploratory.R](analysis/rna_atac_exploratory.R)):
+
+| Figure | Description |
+|--------|-------------|
+| `Fig1_hexbin_density.png` | Hexbin density plots (avoids overplotting) |
+| `Fig2_quadrant_concordance.png` | Concordance analysis with quadrant counts |
+| `Fig3a_upset.png` | UpSet plot of sig gene overlaps |
+| `Fig3b_venn.png` | Venn diagram of sig gene overlaps |
+| `Fig4_focused_scatter.png` | Scatter of sig genes only, labeled by effect size |
+| `Fig5_stratified_boxplots.png` | ATAC changes by RNA direction |
+| `Fig6_top_DEG_heatmap.png` | Heatmap of top 50 DEGs (RNA, Promoter, Enhancer) |
+| `Fig7_prom_vs_enh_barbell.png` | Promoter vs Enhancer comparison per gene |
 
 ## Samples
 
@@ -149,6 +165,10 @@ module load R/4.2.0  # for DESeq2 and integration
 # - fastqc, trim_galore, bowtie2, samtools, bedtools
 # - deeptools, subread (featureCounts), multiqc, picard
 ```
+
+**R packages required:**
+- Core: DESeq2, apeglm, readr, dplyr, ggplot2, ggrepel, optparse, patchwork
+- Exploratory figures: pheatmap, UpSetR, ggVennDiagram, tidyr
 
 ## Reproducibility Features
 
@@ -258,7 +278,10 @@ module load R/4.2.0
 R
 > if (!require("BiocManager")) install.packages("BiocManager")
 > BiocManager::install(c("DESeq2", "apeglm"))
-> install.packages(c("readr", "dplyr", "ggplot2", "stringr", "tibble", "ggrepel", "optparse"))
+> install.packages(c("readr", "dplyr", "ggplot2", "stringr", "tibble", "ggrepel", "optparse", "patchwork"))
+
+# For exploratory figures (rna_atac_exploratory.R)
+> install.packages(c("pheatmap", "UpSetR", "ggVennDiagram", "tidyr"))
 ```
 
 ### Re-running Stages

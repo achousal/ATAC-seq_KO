@@ -198,7 +198,17 @@ else
                 --datadir "$INTEGRATION_DIR" \
                 --figdir "${FIGURES_DIR}/integration" \
                 2>&1 | tee "${LOG_DIR}/rna_atac.$(date +%Y%m%d_%H%M%S).log"
-            
+
+            # Run exploratory figure panel
+            if [[ -f "${SCRIPT_DIR}/rna_atac_exploratory.R" ]]; then
+                log "Running exploratory RNA+ATAC figures"
+                Rscript "${SCRIPT_DIR}/rna_atac_exploratory.R" \
+                    --rna_deg_file "$RNA_DEG_FILE" \
+                    --datadir "$INTEGRATION_DIR" \
+                    --figdir "${FIGURES_DIR}/integration" \
+                    2>&1 | tee "${LOG_DIR}/rna_atac_exploratory.$(date +%Y%m%d_%H%M%S).log"
+            fi
+
             # Copy tables
             for f in "$INTEGRATION_DIR"/*.csv; do
                 [[ -f "$f" ]] && cp "$f" "$TABLES_DIR/"
@@ -230,39 +240,179 @@ else
         Rscript "${SCRIPT_DIR}/deseq_atac.R" "$DA_RESULTS" "${FIGURES_DIR}/da" --figures-only \
             2>&1 || {
             # Fallback: generate figures inline if deseq_atac.R doesn't support --figures-only
-            Rscript --vanilla - "$DA_RESULTS" "${FIGURES_DIR}/da" <<'EOF'
-suppressPackageStartupMessages({ library(ggplot2); library(dplyr); library(readr) })
+            GENE_MAP="${INTEGRATION_DIR}/promoter_closest.tsv"
+            Rscript --vanilla - "$DA_RESULTS" "${FIGURES_DIR}/da" "$GENE_MAP" <<'EOF'
+suppressPackageStartupMessages({
+  library(ggplot2); library(dplyr); library(readr)
+  if (!requireNamespace("ggrepel", quietly = TRUE)) {
+    message("ggrepel not installed - labels will overlap. Install with: install.packages('ggrepel')")
+  }
+})
 args <- commandArgs(trailingOnly = TRUE)
 da <- read_csv(args[1], show_col_types = FALSE)
 outdir <- args[2]; dir.create(outdir, showWarnings = FALSE, recursive = TRUE)
+gene_map_file <- if (length(args) >= 3) args[3] else NULL
 
+# Standardize column names
 if (!"log2FoldChange" %in% names(da) && "log2FC" %in% names(da)) da <- rename(da, log2FoldChange = log2FC)
 if (!"padj" %in% names(da) && "FDR" %in% names(da)) da <- rename(da, padj = FDR)
 
-da <- da %>% mutate(
-  sig = case_when(is.na(padj) | padj > 0.05 | abs(log2FoldChange) < 1 ~ "NS",
-                  log2FoldChange >= 1 ~ "Up", log2FoldChange <= -1 ~ "Down", TRUE ~ "NS"),
-  sig = factor(sig, levels = c("NS", "Up", "Down")),
-  neg_log10_padj = -log10(pmax(padj, 1e-300)))
+# Try to load gene mapping for labels (peak -> gene name)
+# File format: TSV with columns peak_id, gene_id, gene_name, strand, dist_bp, abs_dist
+gene_map <- NULL
+if (!is.null(gene_map_file) && file.exists(gene_map_file)) {
+  message("Loading gene mapping from: ", gene_map_file)
+  gene_map <- tryCatch(
+    read_tsv(gene_map_file, show_col_types = FALSE,
+             col_names = c("peak_id", "gene_id", "gene_name", "strand", "dist_bp", "abs_dist")),
+    error = function(e) { message("Could not read gene map: ", e$message); NULL }
+  )
+}
 
+# Compute significance and labeling columns
+da <- da %>%
+  mutate(
+    sig = case_when(
+      is.na(padj) | padj > 0.05 | abs(log2FoldChange) < 1 ~ "NS",
+      log2FoldChange >= 1 ~ "Up",
+      log2FoldChange <= -1 ~ "Down",
+      TRUE ~ "NS"
+    ),
+    sig = factor(sig, levels = c("NS", "Up", "Down")),
+    neg_log10_padj = -log10(pmax(padj, 1e-300))
+  )
+
+# Add gene labels if mapping available, otherwise use peak IDs
+if (!is.null(gene_map) && "gene_name" %in% names(gene_map)) {
+  # Join on peak_id
+  peak_col <- intersect(c("peak_id", "Geneid", "peak"), names(gene_map))[1]
+  da_col <- intersect(c("peak_id", "Geneid", "peak"), names(da))[1]
+  if (!is.na(peak_col) && !is.na(da_col)) {
+    da <- da %>%
+      left_join(gene_map %>% select(all_of(c(peak_col, "gene_name"))) %>% distinct(),
+                by = setNames(peak_col, da_col))
+    da$label <- da$gene_name
+  }
+}
+
+# Fallback: use truncated peak ID if no gene name
+if (!"label" %in% names(da) || all(is.na(da$label))) {
+  da_col <- intersect(c("peak_id", "Geneid", "peak"), names(da))[1]
+  if (!is.na(da_col)) {
+    # Shorten peak IDs: chr1:1000-2000 -> chr1:1000
+    da$label <- sub("-[0-9]+$", "", da[[da_col]])
+  } else {
+    da$label <- NA_character_
+  }
+}
+
+# Select significant peaks to label:
+# label all if few; otherwise keep strongest significant hits (adaptive cap).
+n_sig_total <- sum(da$sig %in% c("Up", "Down"), na.rm = TRUE)
+label_cap <- min(max(30, ceiling(0.25 * n_sig_total)), 100)
+da <- da %>% mutate(row_id = row_number())
+sig_for_labels <- da %>%
+  filter(sig %in% c("Up", "Down"), !is.na(label), nzchar(label)) %>%
+  arrange(padj, desc(abs(log2FoldChange))) %>%
+  group_by(sig, label) %>%
+  slice_head(n = 1) %>%
+  ungroup()
+
+if (nrow(sig_for_labels) <= label_cap) {
+  label_rows <- sig_for_labels$row_id
+} else {
+  label_rows <- sig_for_labels %>%
+    group_by(sig) %>%
+    arrange(padj, desc(abs(log2FoldChange)), .by_group = TRUE) %>%
+    slice_head(n = ceiling(label_cap / 2)) %>%
+    ungroup() %>%
+    arrange(padj, desc(abs(log2FoldChange))) %>%
+    slice_head(n = label_cap) %>%
+    pull(row_id)
+}
+
+da <- da %>%
+  mutate(
+    show_label = ifelse(row_id %in% label_rows, label, NA_character_),
+    show_dot = !is.na(show_label)
+  ) %>%
+  select(-row_id)
+
+# Build volcano plot
 p <- ggplot(da, aes(x = log2FoldChange, y = neg_log10_padj, color = sig)) +
-  geom_point(alpha = 0.5, size = 1) +
+  geom_point(aes(alpha = sig), size = 1.05) +
+  geom_point(
+    data = da %>% filter(sig %in% c("Up", "Down")),
+    size = 1.5, alpha = 0.85, show.legend = FALSE
+  ) +
+  geom_point(
+    data = da %>% filter(show_dot),
+    aes(fill = sig),
+    shape = 21, size = 2.2, stroke = 0.35, color = "black",
+    alpha = 0.95, show.legend = FALSE
+  ) +
   scale_color_manual(values = c("NS" = "grey70", "Up" = "#D55E00", "Down" = "#0072B2")) +
-  geom_hline(yintercept = -log10(0.05), linetype = "dashed") +
-  geom_vline(xintercept = c(-1, 1), linetype = "dashed") +
-  labs(title = "ATAC-seq DA (ATF5 KO vs WT)", x = "log2FC", y = "-log10(padj)") +
-  theme_classic(base_size = 12) + theme(legend.position = "bottom")
-ggsave(file.path(outdir, "volcano_ATAC_DA.png"), p, width = 6, height = 6, dpi = 300)
-ggsave(file.path(outdir, "volcano_ATAC_DA.pdf"), p, width = 6, height = 6)
+  scale_alpha_manual(values = c("NS" = 0.14, "Up" = 0.70, "Down" = 0.70), guide = "none") +
+  scale_fill_manual(values = c("NS" = "grey70", "Up" = "#D55E00", "Down" = "#0072B2"), guide = "none") +
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "grey50") +
+  geom_vline(xintercept = c(-1, 1), linetype = "dashed", color = "grey50") +
+  labs(title = "ATAC-seq DA (ATF5 KO vs WT)",
+       subtitle = sprintf("Up: %d | Down: %d (padj<0.05, |LFC|>1); labels: %d",
+                          sum(da$sig == "Up"), sum(da$sig == "Down"), sum(da$show_dot)),
+       x = "log2 Fold Change", y = "-log10(adjusted p-value)", color = "Status") +
+  theme_classic(base_size = 12) +
+  theme(legend.position = "bottom")
 
+# Add labels with ggrepel if available
+if (requireNamespace("ggrepel", quietly = TRUE)) {
+  p <- p + ggrepel::geom_text_repel(
+    data = da %>% filter(!is.na(show_label)),
+    aes(label = show_label),
+    size = 2.8, fontface = "italic", max.overlaps = Inf, segment.color = "grey55",
+    min.segment.length = 0.1, box.padding = 0.3, point.padding = 0.2,
+    show.legend = FALSE
+  )
+}
+ggsave(file.path(outdir, "volcano_ATAC_DA.png"), p, width = 7, height = 7, dpi = 300)
+ggsave(file.path(outdir, "volcano_ATAC_DA.pdf"), p, width = 7, height = 7)
+message("Volcano plot saved")
+
+# MA plot
 if ("baseMean" %in% names(da) && !all(is.na(da$baseMean))) {
   p_ma <- ggplot(da, aes(x = log10(baseMean + 1), y = log2FoldChange, color = sig)) +
-    geom_point(alpha = 0.5, size = 1) +
+    geom_point(aes(alpha = sig), size = 1.05) +
+    geom_point(
+      data = da %>% filter(sig %in% c("Up", "Down")),
+      size = 1.5, alpha = 0.85, show.legend = FALSE
+    ) +
+    geom_point(
+      data = da %>% filter(show_dot),
+      aes(fill = sig),
+      shape = 21, size = 2.2, stroke = 0.35, color = "black",
+      alpha = 0.95, show.legend = FALSE
+    ) +
     scale_color_manual(values = c("NS" = "grey70", "Up" = "#D55E00", "Down" = "#0072B2")) +
-    geom_hline(yintercept = c(-1, 0, 1), linetype = c("dashed", "solid", "dashed")) +
-    labs(title = "MA Plot", x = "log10(baseMean + 1)", y = "log2FC") +
-    theme_classic(base_size = 12) + theme(legend.position = "bottom")
-  ggsave(file.path(outdir, "MA_plot_ATAC_DA.png"), p_ma, width = 6, height = 5, dpi = 300)
+    scale_alpha_manual(values = c("NS" = 0.14, "Up" = 0.70, "Down" = 0.70), guide = "none") +
+    scale_fill_manual(values = c("NS" = "grey70", "Up" = "#D55E00", "Down" = "#0072B2"), guide = "none") +
+    geom_hline(yintercept = c(-1, 0, 1), linetype = c("dashed", "solid", "dashed"), color = "grey50") +
+    labs(title = "MA Plot (ATAC-seq DA)",
+         subtitle = sprintf("Up: %d | Down: %d; labels: %d",
+                            sum(da$sig == "Up"), sum(da$sig == "Down"), sum(da$show_dot)),
+         x = "log10(mean counts + 1)", y = "log2 Fold Change", color = "Status") +
+    theme_classic(base_size = 12) +
+    theme(legend.position = "bottom")
+  if (requireNamespace("ggrepel", quietly = TRUE)) {
+    p_ma <- p_ma + ggrepel::geom_text_repel(
+      data = da %>% filter(!is.na(show_label)),
+      aes(label = show_label),
+      size = 2.8, fontface = "italic", max.overlaps = Inf, segment.color = "grey55",
+      min.segment.length = 0.1, box.padding = 0.3, point.padding = 0.2,
+      show.legend = FALSE
+    )
+  }
+  ggsave(file.path(outdir, "MA_plot_ATAC_DA.png"), p_ma, width = 7, height = 6, dpi = 300)
+  ggsave(file.path(outdir, "MA_plot_ATAC_DA.pdf"), p_ma, width = 7, height = 6)
+  message("MA plot saved")
 }
 message("Figures saved to: ", outdir)
 EOF

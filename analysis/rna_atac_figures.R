@@ -85,6 +85,54 @@ qrange <- function(v) {
   as.numeric(quantile(v, probs = c(0.01, 0.99), na.rm = TRUE))
 }
 
+select_panel_labels <- function(df, sig_cols, padj_cols, lfc_cols, top_n = 30) {
+  sig_cols <- intersect(sig_cols, names(df))
+  padj_cols <- intersect(padj_cols, names(df))
+  lfc_cols <- intersect(lfc_cols, names(df))
+  if (!("gene_label" %in% names(df)) || length(sig_cols) == 0 || length(padj_cols) == 0 || length(lfc_cols) == 0) {
+    return(character(0))
+  }
+
+  n <- nrow(df)
+  any_sig <- rep(FALSE, n)
+  both_sig <- rep(TRUE, n)
+  for (col in sig_cols) {
+    v <- as.logical(df[[col]])
+    v[is.na(v)] <- FALSE
+    any_sig <- any_sig | v
+    both_sig <- both_sig & v
+  }
+
+  padj_mat <- sapply(padj_cols, function(col) {
+    v <- as.numeric(df[[col]])
+    v[is.na(v)] <- 1
+    v
+  })
+  if (is.null(dim(padj_mat))) padj_mat <- matrix(padj_mat, ncol = 1)
+  best_padj <- apply(padj_mat, 1, min)
+
+  lfc_mat <- sapply(lfc_cols, function(col) abs(as.numeric(df[[col]])))
+  if (is.null(dim(lfc_mat))) lfc_mat <- matrix(lfc_mat, ncol = 1)
+  lfc_mat[!is.finite(lfc_mat)] <- NA_real_
+  max_abs_lfc <- apply(lfc_mat, 1, function(x) {
+    m <- suppressWarnings(max(x, na.rm = TRUE))
+    if (is.finite(m)) m else 0
+  })
+
+  rank_df <- tibble(
+    gene_label = as.character(df$gene_label),
+    any_sig = any_sig,
+    both_sig = both_sig,
+    best_padj = best_padj,
+    max_abs_lfc = max_abs_lfc
+  ) %>%
+    filter(!is.na(gene_label), nzchar(gene_label)) %>%
+    arrange(desc(any_sig), desc(both_sig), best_padj, desc(max_abs_lfc)) %>%
+    distinct(gene_label, .keep_all = TRUE)
+
+  rank_df %>% slice_head(n = top_n) %>% pull(gene_label)
+}
+
 make_panel <- function(df, x, y, xlab, ylab, title,
                        label_genes = NULL, xlim = NULL, ylim = NULL) {
 
@@ -128,6 +176,7 @@ make_panel <- function(df, x, y, xlab, ylab, title,
     ) +
 
     ggplot2::scale_color_manual(values = pal, drop = FALSE) +
+    ggplot2::scale_fill_manual(values = pal, guide = "none", drop = FALSE) +
     ggplot2::scale_alpha_manual(values = alpha_map, guide = "none", drop = FALSE) +
 
     ggplot2::labs(
@@ -153,12 +202,28 @@ make_panel <- function(df, x, y, xlab, ylab, title,
   }
 
   if (!is.null(label_genes) && length(label_genes) > 0 && "gene_label" %in% names(df)) {
-    lab_df <- df %>% dplyr::filter(!is.na(gene_label), gene_label %in% label_genes)
+    lab_df <- df %>% dplyr::filter(
+      !is.na(gene_label),
+      gene_label %in% label_genes,
+      sig_class != "not sig"
+    )
+
+    p <- p + ggplot2::geom_point(
+      data = lab_df,
+      ggplot2::aes(fill = sig_class),
+      shape = 21,
+      size = 2.2,
+      stroke = 0.3,
+      color = "black",
+      alpha = 0.95,
+      show.legend = FALSE
+    )
 
     p <- p + ggrepel::geom_text_repel(
       data = lab_df,
       ggplot2::aes(label = gene_label),
       size = 3.1,
+      fontface = "italic",
       max.overlaps = 30,          # <- key: don’t let labels swamp the panel
       box.padding = 0.30,
       point.padding = 0.15,
@@ -311,23 +376,45 @@ summ <- tibble(
 write_csv(summ, file.path(opt$datadir, "summary_stats.csv"))
 
 # ---------------- figures ----------------
-label_genes <- unique(top_rna$gene_label)
-
 df_rna_prom <- gene_merged %>% filter(!is.na(rna_log2FC), !is.na(prom_best_log2FC))
 df_rna_enh  <- gene_merged %>% filter(!is.na(rna_log2FC), !is.na(enh_best_log2FC))
 df_prom_enh <- gene_merged %>% filter(!is.na(prom_best_log2FC), !is.na(enh_best_log2FC))
 
+label_genes_rna_prom <- select_panel_labels(
+  df_rna_prom,
+  sig_cols = c("rna_sig", "prom_sig"),
+  padj_cols = c("rna_padj", "prom_best_padj"),
+  lfc_cols = c("rna_log2FC", "prom_best_log2FC"),
+  top_n = opt$topN
+)
+
+label_genes_rna_enh <- select_panel_labels(
+  df_rna_enh,
+  sig_cols = c("rna_sig", "enh_sig"),
+  padj_cols = c("rna_padj", "enh_best_padj"),
+  lfc_cols = c("rna_log2FC", "enh_best_log2FC"),
+  top_n = opt$topN
+)
+
+label_genes_prom_enh <- select_panel_labels(
+  df_prom_enh,
+  sig_cols = c("prom_sig", "enh_sig"),
+  padj_cols = c("prom_best_padj", "enh_best_padj"),
+  lfc_cols = c("prom_best_log2FC", "enh_best_log2FC"),
+  top_n = opt$topN
+)
+
 p1 <- make_panel(df_rna_prom, "rna_log2FC","prom_best_log2FC",
                  "RNA log2FC (ATF5KO vs WT)", "Promoter best-peak log2FC",
-                 "RNA vs Promoter", label_genes)
+                 "RNA vs Promoter", label_genes_rna_prom)
 
 p2 <- make_panel(df_rna_enh, "rna_log2FC","enh_best_log2FC",
                  "RNA log2FC (ATF5KO vs WT)", "Enhancer best-peak log2FC",
-                 "RNA vs Enhancer", label_genes)
+                 "RNA vs Enhancer", label_genes_rna_enh)
 
 p3 <- make_panel(df_prom_enh, "prom_best_log2FC","enh_best_log2FC",
                  "Promoter best-peak log2FC", "Enhancer best-peak log2FC",
-                 "Promoter vs Enhancer", label_genes)
+                 "Promoter vs Enhancer", label_genes_prom_enh)
 
 have_patchwork <- requireNamespace("patchwork", quietly = TRUE)
 if (have_patchwork) {
@@ -349,15 +436,15 @@ x3 <- qrange(df_prom_enh$prom_best_log2FC); y3 <- qrange(df_prom_enh$enh_best_lo
 
 p1z <- make_panel(df_rna_prom, "rna_log2FC","prom_best_log2FC",
                   "RNA log2FC (ATF5KO vs WT)", "Promoter best-peak log2FC",
-                  "RNA vs Promoter (DE-scale)", label_genes, xlim = x1, ylim = y1)
+                  "RNA vs Promoter (DE-scale)", label_genes_rna_prom, xlim = x1, ylim = y1)
 
 p2z <- make_panel(df_rna_enh, "rna_log2FC","enh_best_log2FC",
                   "RNA log2FC (ATF5KO vs WT)", "Enhancer best-peak log2FC",
-                  "RNA vs Enhancer (DE-scale)", label_genes, xlim = x2, ylim = y2)
+                  "RNA vs Enhancer (DE-scale)", label_genes_rna_enh, xlim = x2, ylim = y2)
 
 p3z <- make_panel(df_prom_enh, "prom_best_log2FC","enh_best_log2FC",
                   "Promoter best-peak log2FC", "Enhancer best-peak log2FC",
-                  "Promoter vs Enhancer (DE-scale)", label_genes, xlim = x3, ylim = y3)
+                  "Promoter vs Enhancer (DE-scale)", label_genes_prom_enh, xlim = x3, ylim = y3)
 
 if (have_patchwork) {
   p_full <- (p1z + p2z + p3z) +
