@@ -237,10 +237,10 @@ else
     
     if [[ $FORCE -eq 1 ]] || ! checkpoint "$VOLCANO_PNG" "Volcano plot"; then
         log "Generating DA figures"
-        Rscript "${SCRIPT_DIR}/deseq_atac.R" "$DA_RESULTS" "${FIGURES_DIR}/da" --figures-only \
+        GENE_MAP="${INTEGRATION_DIR}/promoter_closest.tsv"
+        Rscript "${SCRIPT_DIR}/deseq_atac.R" "$DA_RESULTS" "${FIGURES_DIR}/da" --figures-only "$GENE_MAP" \
             2>&1 || {
-            # Fallback: generate figures inline if deseq_atac.R doesn't support --figures-only
-            GENE_MAP="${INTEGRATION_DIR}/promoter_closest.tsv"
+            # Fallback: generate figures inline if deseq_atac.R fails
             Rscript --vanilla - "$DA_RESULTS" "${FIGURES_DIR}/da" "$GENE_MAP" <<'EOF'
 suppressPackageStartupMessages({
   library(ggplot2); library(dplyr); library(readr)
