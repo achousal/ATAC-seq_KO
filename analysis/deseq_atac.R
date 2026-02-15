@@ -122,7 +122,7 @@ if (figures_only) {
   
   # Select significant peaks to label
   n_sig_total <- sum(da$sig %in% c("Up", "Down"), na.rm = TRUE)
-  label_cap <- min(max(30, ceiling(0.25 * n_sig_total)), 100)
+  label_cap <- 20
   da <- da %>% mutate(row_id = row_number())
   
   sig_for_labels <- da %>%
