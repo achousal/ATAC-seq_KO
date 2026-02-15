@@ -105,13 +105,34 @@ atacseq_analysis.sh (main pipeline)
     |       +-- MACS3 callpeak (BAMPE mode, --nomodel)
     |       +-- Bedtools intersect (remove blacklisted regions)
     |
-    +-- STEP 3: Union Peak Set
+    +-- STEP 3: IDR Analysis (if idr available) or Union Peak Set
     |   |
-    |   +-- Merge all replicate peaks
-    |   +-- Create union BED file
+    |   +-- For each condition (WT, KO):
+    |   |   +-- Pool replicate BAMs
+    |   |   +-- Call peaks on pooled sample
+    |   |   +-- Generate two pseudoreplicates (random 50/50 split)
+    |   |   +-- Call peaks on each pseudoreplicate
+    |   |   +-- Call peaks on true replicates
+    |   |   +-- Run IDR on true replicates
+    |   |   +-- Run IDR on pooled pseudoreplicates
+    |   |   +-- Determine Nt and Np (peaks passing IDR threshold)
+    |   |   +-- Select top max(Nt, Np) peaks from pooled peak set
+    |   +-- Merge WT-optimal and KO-optimal peaks to form consensus
+    |   +-- Fallback to union peak calling if IDR unavailable
     |   +-- Convert to SAF format (for featureCounts)
     |
-    +-- STEP 3.5: HOMER Annotation and Motif Analysis
+    +-- STEP 3.5: Extended QC Metrics
+    |   |
+    |   +-- For each sample:
+    |       +-- Compute FRiP (fraction of reads in peaks)
+    |       +-- Compute TSS enrichment score
+    |       +-- Compute fragment size distribution (mean, median)
+    |       +-- Compute nucleosome-free ratio (NFR)
+    |       +-- Compute blacklist fraction
+    |       +-- Compute library complexity (PBC1, PBC2)
+    |   +-- Write qc_metrics_extended.tsv
+    |
+    +-- STEP 3.6: HOMER Annotation and Motif Analysis
     |   |
     |   +-- Load HOMER module
     |   +-- Center peaks (1bp centers for consistent -size window)
@@ -140,6 +161,22 @@ atacseq_analysis.sh (main pipeline)
                 +-- DA_KO_down.csv (peaks with lower accessibility in KO, padj<=0.05, LFC<=-1)
                 +-- PCA_samples.pdf (sample PCA plot, VST-transformed)
                 +-- PCA_coordinates.csv (PC1/PC2 coordinates + variance explained)
+        +-- Unload R module
+    |
+    +-- STEP 5.5: Multi-Method Concordance Analysis
+        |
+        +-- Load R/4.2.0 module
+        +-- Run da_concordance.R
+            |
+            +-- Load count matrix and metadata
+            +-- Run DESeq2 (unshrunken LFC)
+            +-- Run edgeR (TMM normalization)
+            +-- Run limma-voom
+            +-- Compare results across methods
+            +-- Flag high-confidence peaks (significant in >=2 of 3 methods)
+            +-- Generate outputs:
+                +-- DA_comparison.csv (side-by-side method comparison)
+                +-- DA_high_confidence.csv (peaks passing concordance filter)
         +-- Unload R module
 
 ### Optional Post-Pipeline Steps (Manual)
@@ -177,9 +214,30 @@ OPTIONAL: RNA-ATAC Integration (manual)
         +-- Outputs:
             +-- analysis/gene_integration/genelevel_RNA_Prom_Enh_merged.csv
             +-- analysis/gene_integration/top30_RNA_genes.csv
+            +-- analysis/gene_integration/integrated_genes_ranked.csv
+            +-- analysis/gene_integration/top_integrated_genes.csv
             +-- analysis/gene_integration/summary_stats.csv
             +-- analysis/gene_integration/figures/Figure1_threepanel_fullrange_RNA_Prom_Enh.png
             +-- analysis/gene_integration/figures/Figure2_threepanel_DEscale_RNA_Prom_Enh.png
+    |
+    +-- Driver Inference (optional, requires RNA-seq and motif data)
+        |
+        +-- Load R/4.2.0 module
+        +-- Run driver_inference.R
+            |
+            +-- Load RNA DEGs
+            +-- Load ATAC DA results (promoter + enhancer)
+            +-- Load HOMER motif enrichment results
+            +-- Identify TFs with DA at own locus
+            +-- Identify TFs with motif enrichment in DA peaks
+            +-- Identify TFs with concordant RNA expression changes
+            +-- Integrate evidence and tier candidates:
+                +-- Tier 1: all three evidence lines
+                +-- Tier 2: two of three evidence lines
+                +-- Tier 3: single evidence line (exploratory)
+            +-- Generate outputs:
+                +-- driver_candidates_tiered.csv
+                +-- driver_evidence_summary.txt
 ```
 
 ## Detailed Step-by-Step Guide
@@ -369,12 +427,15 @@ Rscript analysis/rna_atac_figures.R \
 
 # Outputs will be in:
 # - analysis/gene_integration/genelevel_RNA_Prom_Enh_merged.csv
+# - analysis/gene_integration/integrated_genes_ranked.csv
+# - analysis/gene_integration/top_integrated_genes.csv
 # - analysis/gene_integration/figures/*.png
 ```
 
 **Expected outputs:**
 - Gene-level merged table (RNA + promoter + enhancer DA)
 - Top N DEGs table
+- Ranked integrated genes table (RNA + ATAC significance gate, rank-product ordering)
 - Summary statistics (overlap counts, correlations)
 - Three-panel scatter plots:
   - RNA log2FC vs Promoter log2FC
@@ -482,16 +543,22 @@ conda create -n csb -c bioconda -c conda-forge \
 |--------|------|-------------|
 | Final BAMs | `analysis/samtools/*.final.bam` | Filtered, deduplicated BAMs (MAPQ>=20, proper pairs, no chrM) |
 | BigWigs | `analysis/deeptools/*.CPM.bw` | CPM-normalized coverage tracks (for IGV) |
-| Union peaks | `analysis/macs/union_peaks.bed` | Merged peak set (blacklist-filtered) |
+| IDR summary | `analysis/macs/idr/idr_summary.tsv` | IDR analysis summary (Nt, Np, optimal peak counts) |
+| IDR consensus peaks | `analysis/macs/idr/idr_consensus_peaks.bed` | Optimal peak set from IDR analysis (WT + KO merged) |
+| IDR method flag | `analysis/macs/idr/idr_method.txt` | Indicates whether IDR or union fallback was used |
+| Union peaks | `analysis/macs/union_peaks.bed` | Merged peak set (blacklist-filtered, used if no IDR) |
 | Count matrix | `analysis/subread/union_peaks_featureCounts.txt` | Read counts per peak per sample |
 | DA results | `analysis/subread/deseq/DA_results_DESeq2.csv` | All peaks with log2FC, p-values, padj (apeglm shrinkage) |
 | DA up (KO) | `analysis/subread/deseq/DA_KO_up.csv` | Sig. peaks: padj<=0.05, log2FC>=1 |
 | DA down (KO) | `analysis/subread/deseq/DA_KO_down.csv` | Sig. peaks: padj<=0.05, log2FC<=-1 |
+| DA comparison | `analysis/subread/concordance/DA_comparison.csv` | Side-by-side comparison of DESeq2, edgeR, limma-voom |
+| DA high-confidence | `analysis/subread/concordance/DA_high_confidence.csv` | Peaks significant in >=2 of 3 methods |
 | PCA plot | `analysis/subread/deseq/PCA_samples.pdf` | Sample PCA (VST-transformed, labeled) |
 | PCA coordinates | `analysis/subread/deseq/PCA_coordinates.csv` | PC1/PC2 values + variance explained |
 | HOMER annotation | `analysis/homer/union_peaks.annotatePeaks.size200.txt` | Peak genomic context |
 | HOMER motifs | `analysis/homer/motifs_union.size200/homerResults.html` | Enriched motifs |
-| QC table | `analysis/subread/qc_metrics.tsv` | Alignment and duplication stats |
+| QC table (basic) | `analysis/subread/qc_metrics.tsv` | Alignment and duplication stats |
+| QC table (extended) | `analysis/subread/qc_metrics_extended.tsv` | FRiP, TSS enrichment, fragment size, NFR, blacklist fraction, PBC1/PBC2 |
 | MultiQC | `analysis/multiqc/multiqc_report.html` | Aggregated QC report |
 | Versions | `analysis/logs/versions.txt` | Software versions used |
 
@@ -520,8 +587,12 @@ The main ATAC-seq pipeline automatically generates the following visualizations:
 | Enhancer DA | `analysis/gene_integration/enhancer_DA.csv` | DA results for enhancer peaks |
 | Gene-level merged | `analysis/gene_integration/genelevel_RNA_Prom_Enh_merged.csv` | RNA + ATAC merged at gene level |
 | Top DEGs | `analysis/gene_integration/top30_RNA_genes.csv` | Top N differentially expressed genes |
+| Integrated ranking (all) | `analysis/gene_integration/integrated_genes_ranked.csv` | Genes significant in RNA and >=1 ATAC layer, ranked by multi-modal rank product |
+| Top integrated genes | `analysis/gene_integration/top_integrated_genes.csv` | Top N integrated genes from combined RNA+ATAC ranking |
 | Summary stats | `analysis/gene_integration/summary_stats.csv` | Overlap counts and correlations |
 | Integration figures | `analysis/gene_integration/figures/*.png` | RNA-ATAC correlation plots |
+| Driver candidates (tiered) | `analysis/gene_integration/driver_candidates_tiered.csv` | TF candidates with evidence tier (1/2/3) and supporting evidence |
+| Driver evidence summary | `analysis/gene_integration/driver_evidence_summary.txt` | Human-readable summary of driver inference results |
 
 ### Directory Structure
 
@@ -536,6 +607,10 @@ analysis/
 ├── macs/                # Peak files (per-replicate and union)
 │   ├── rep_peaks/       # Per-replicate peaks
 │   ├── rep_peaks_bl/    # Blacklist-filtered peaks
+│   ├── idr/             # IDR analysis outputs
+│   │   ├── idr_summary.tsv
+│   │   ├── idr_consensus_peaks.bed
+│   │   └── idr_method.txt
 │   ├── union_peaks.bed
 │   └── union_peaks.saf
 ├── homer/               # Annotation and motifs
@@ -545,12 +620,16 @@ analysis/
 ├── subread/             # Quantification
 │   ├── union_peaks_featureCounts.txt
 │   ├── qc_metrics.tsv
-│   └── deseq/           # Differential analysis
-│       ├── DA_results_DESeq2.csv
-│       ├── DA_KO_up.csv
-│       ├── DA_KO_down.csv
-│       ├── PCA_samples.pdf
-│       └── PCA_coordinates.csv
+│   ├── qc_metrics_extended.tsv
+│   ├── deseq/           # Differential analysis
+│   │   ├── DA_results_DESeq2.csv
+│   │   ├── DA_KO_up.csv
+│   │   ├── DA_KO_down.csv
+│   │   ├── PCA_samples.pdf
+│   │   └── PCA_coordinates.csv
+│   └── concordance/     # Multi-method comparison
+│       ├── DA_comparison.csv
+│       └── DA_high_confidence.csv
 ├── gene_integration/    # Optional: RNA-ATAC integration
 │   ├── tss.bed
 │   ├── peaks.center.bed
@@ -563,7 +642,11 @@ analysis/
 │   ├── enhancer_DA.csv
 │   ├── genelevel_RNA_Prom_Enh_merged.csv
 │   ├── top30_RNA_genes.csv
+│   ├── integrated_genes_ranked.csv
+│   ├── top_integrated_genes.csv
 │   ├── summary_stats.csv
+│   ├── driver_candidates_tiered.csv
+│   ├── driver_evidence_summary.txt
 │   └── figures/
 │       ├── Figure1_threepanel_fullrange_RNA_Prom_Enh.png
 │       └── Figure2_threepanel_DEscale_RNA_Prom_Enh.png
@@ -605,12 +688,14 @@ bash analysis/validate_outputs.sh /path/to/analysis
 Checks:
 - Final BAM files exist and are indexed
 - BigWig files exist
-- Union peaks exist
+- Peak files exist (IDR consensus or union peaks)
 - featureCounts output exists
 - DESeq2 outputs exist (DA results, PCA, up/down peaks)
+- Concordance outputs exist (DA comparison, high-confidence peaks)
 - HOMER outputs exist (annotation, motifs)
 - MultiQC report exists
-- QC table exists
+- QC tables exist (basic and extended metrics)
+- IDR outputs exist (if IDR was used)
 
 ## Analysis Notes
 
@@ -621,6 +706,36 @@ Checks:
 - **Library prep**: Nextera-based ATAC-seq (Tn5 transposase)
 - **Replicates**: 3 biological replicates per condition (WT and KO)
 - **Batch structure**: Single batch (no batch correction needed)
+
+### Methods
+
+#### IDR (Irreproducible Discovery Rate)
+
+Peak reproducibility was assessed using the ENCODE IDR framework. For each condition, replicate BAMs were pooled and peaks called on the pooled sample. Two pseudoreplicates were generated by random 50/50 read splitting. The optimal peak set was determined using the ENCODE max(Nt, Np) rule: Nt = peaks passing IDR threshold (0.05) in true replicate comparison; Np = peaks passing threshold in pooled pseudoreplicate comparison. The top max(Nt, Np) peaks from the pooled peak set constitute the optimal set per condition. Consensus peaks were formed by merging WT-optimal and KO-optimal peak sets. If IDR software is unavailable, the pipeline falls back to union peak calling.
+
+#### QC Metrics
+
+Extended quality control metrics are computed per sample: FRiP (Fraction of Reads in Peaks), TSS enrichment score, mean/median fragment size, nucleosome-free ratio (NFR; fragments less than 150bp divided by fragments 150-300bp), blacklist fraction, and library complexity (PBC1, PBC2). ENCODE minimum thresholds: FRiP greater than or equal to 0.1, TSS enrichment greater than or equal to 5, NFR ratio greater than or equal to 1.0.
+
+#### Multi-Method Concordance
+
+Differential accessibility is independently assessed by DESeq2, edgeR, and limma-voom using unshrunken log2 fold changes for harmonized comparison. Peaks significant (padj less than 0.05, absolute LFC greater than or equal to 1) in at least 2 of 3 methods are flagged as high-confidence. This concordance filter serves as a robustness/stability check, not a formal statistical proof of differential accessibility.
+
+#### Peak-to-Gene Assignment
+
+Peaks are assigned to genes using multi-gene window assignment within a configurable window (default: 50kb from TSS). Assignments are distance-weighted using an exponential decay function (weight = 1/(1 + dist/decay), default decay = 10kb). Promoter peaks (within 2kb of TSS) are prioritized. Distal (enhancer) assignments are capped at 5 genes per peak by weight rank.
+
+#### Integration Statistics
+
+Peak-to-gene integration uses signed Stouffer Z-score combination on raw p-values with post-hoc BH correction. Cross-modality evidence is ranked by harmonic mean p-value (HMP) of raw per-modality p-values. HMP serves as an evidence ranking metric, not a formal joint FDR.
+
+#### Driver Inference
+
+Candidate driver transcription factors are identified by integrating three evidence lines: (1) differential chromatin accessibility at the TF's own locus, (2) enrichment of the TF's binding motif in directionally-changed peaks (HOMER findMotifsGenome.pl), and (3) concordant RNA expression changes. Candidates are tiered: Tier 1 (all three evidence lines), Tier 2 (two of three), Tier 3 (single evidence, exploratory). This is hypothesis-generating evidence integration, not causal proof of driver status.
+
+#### Interpretation Boundaries
+
+Integrated rankings identify candidates for experimental validation, not confirmed regulatory relationships. Statistical associations between chromatin accessibility and gene expression do not establish causality.
 
 ### Pipeline Parameters
 
@@ -637,6 +752,7 @@ Checks:
 - **Promoter definition**: Peaks within ±2kb of TSS
 - **Enhancer definition**: Peaks 2kb-50kb from TSS
 - **Gene-level collapse**: Best peak per gene (min padj, tie-break by max abs(log2FC))
+- **Integrated gene ranking**: RNA-significant + >=1 ATAC-significant genes ranked by geometric mean of modality ranks (RNA/promoter/enhancer); harmonic mean p-value retained as secondary evidence
 - **Significance threshold**: padj < 0.05 (default, adjustable)
 - **Top genes for labeling**: Up to top 30, prioritizing significant genes across RNA/promoter/enhancer by best padj and effect size (default, adjustable)
 

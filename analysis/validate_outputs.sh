@@ -30,6 +30,13 @@ for dir in samtools picard deeptools macs subread homer multiqc logs; do
     fi
 done
 
+# Optional directories (integration)
+if [[ -d "$ANALYSIS_DIR/gene_integration" ]]; then
+    check_pass "Directory exists: gene_integration/ (optional)"
+else
+    check_warn "Directory not present: gene_integration/ (optional, skipped if no integration)"
+fi
+
 # -----------------------------------------------------------------------------
 # 2. BAM integrity
 # -----------------------------------------------------------------------------
@@ -208,6 +215,211 @@ if [[ -s "$versions" ]]; then
     check_pass "Versions log exists"
 else
     check_warn "Versions log missing"
+fi
+
+# -----------------------------------------------------------------------------
+# 9. IDR outputs
+# -----------------------------------------------------------------------------
+echo ""
+echo "--- Checking IDR outputs ---"
+
+if [[ -d "$ANALYSIS_DIR/macs/idr" ]]; then
+    idr_summary="$ANALYSIS_DIR/macs/idr/idr_summary.tsv"
+    idr_consensus="$ANALYSIS_DIR/macs/idr/idr_consensus_peaks.bed"
+    idr_saf="$ANALYSIS_DIR/macs/idr/idr_consensus_peaks.saf"
+    idr_method="$ANALYSIS_DIR/macs/idr/idr_method.txt"
+
+    if [[ -s "$idr_summary" ]]; then
+        idr_rows=$(($(wc -l < "$idr_summary") - 1))
+        check_pass "IDR summary: $idr_rows comparisons"
+    else
+        check_warn "IDR summary missing or empty"
+    fi
+
+    if [[ -s "$idr_consensus" ]]; then
+        idr_peak_count=$(wc -l < "$idr_consensus")
+        check_pass "IDR consensus peaks: $idr_peak_count peaks"
+    else
+        check_warn "IDR consensus peaks missing or empty"
+    fi
+
+    if [[ -s "$idr_saf" ]]; then
+        check_pass "IDR consensus SAF exists"
+    else
+        check_warn "IDR consensus SAF missing or empty"
+    fi
+
+    if [[ -s "$idr_method" ]]; then
+        check_pass "IDR method file exists"
+    else
+        check_warn "IDR method file missing"
+    fi
+else
+    check_warn "IDR directory not found (optional analysis)"
+fi
+
+# -----------------------------------------------------------------------------
+# 10. Extended QC metrics
+# -----------------------------------------------------------------------------
+echo ""
+echo "--- Checking extended QC metrics ---"
+
+qc_extended="$ANALYSIS_DIR/subread/qc_metrics_extended.tsv"
+if [[ -s "$qc_extended" ]]; then
+    qc_ext_samples=$(($(wc -l < "$qc_extended") - 1))
+    check_pass "Extended QC metrics: $qc_ext_samples samples"
+
+    # Check for expected columns
+    header=$(head -1 "$qc_extended")
+    for col in sample frip tss_enrichment fragment_mean fragment_median nfr_ratio blacklist_fraction pbc1 pbc2; do
+        if echo "$header" | grep -qi "$col"; then
+            check_pass "Extended QC has column: $col"
+        else
+            check_warn "Extended QC missing column: $col"
+        fi
+    done
+else
+    check_warn "Extended QC metrics missing (optional)"
+fi
+
+# -----------------------------------------------------------------------------
+# 11. Multi-method DA concordance
+# -----------------------------------------------------------------------------
+echo ""
+echo "--- Checking multi-method DA concordance ---"
+
+if [[ -d "$ANALYSIS_DIR/subread/concordance" ]]; then
+    concordance_dir="$ANALYSIS_DIR/subread/concordance"
+
+    for method_file in DA_edgeR.csv DA_limma.csv; do
+        if [[ -s "$concordance_dir/$method_file" ]]; then
+            check_pass "DA method results exist: $method_file"
+        else
+            check_warn "DA method results missing: $method_file"
+        fi
+    done
+
+    da_comparison="$concordance_dir/DA_comparison.csv"
+    if [[ -s "$da_comparison" ]]; then
+        comparison_rows=$(($(wc -l < "$da_comparison") - 1))
+        check_pass "DA comparison table: $comparison_rows peaks"
+    else
+        check_warn "DA comparison table missing or empty"
+    fi
+
+    da_high_conf="$concordance_dir/DA_high_confidence.csv"
+    if [[ -s "$da_high_conf" ]]; then
+        high_conf_rows=$(($(wc -l < "$da_high_conf") - 1))
+        check_pass "High-confidence DA peaks: $high_conf_rows peaks"
+    else
+        check_warn "High-confidence DA peaks missing or empty"
+    fi
+
+    concordance_summary="$concordance_dir/concordance_summary.txt"
+    if [[ -s "$concordance_summary" ]]; then
+        check_pass "Concordance summary exists"
+    else
+        check_warn "Concordance summary missing"
+    fi
+else
+    check_warn "Concordance directory not found (optional analysis)"
+fi
+
+# -----------------------------------------------------------------------------
+# 12. Multi-gene peak-to-gene assignment
+# -----------------------------------------------------------------------------
+echo ""
+echo "--- Checking multi-gene peak-to-gene assignment ---"
+
+if [[ -d "$ANALYSIS_DIR/gene_integration" ]]; then
+    integration_dir="$ANALYSIS_DIR/gene_integration"
+
+    tss_bed="$integration_dir/tss.bed"
+    if [[ -s "$tss_bed" ]]; then
+        check_pass "TSS BED file exists"
+    else
+        check_warn "TSS BED file missing"
+    fi
+
+    multi_tss="$integration_dir/union_peaks_multiTSS.tsv"
+    if [[ -s "$multi_tss" ]]; then
+        multi_tss_rows=$(($(wc -l < "$multi_tss") - 1))
+        check_pass "Multi-TSS peak assignments: $multi_tss_rows rows"
+    else
+        check_warn "Multi-TSS peak assignments missing or empty"
+    fi
+
+    prom_multi="$integration_dir/promoter_multigene.tsv"
+    if [[ -s "$prom_multi" ]]; then
+        prom_multi_rows=$(($(wc -l < "$prom_multi") - 1))
+        check_pass "Promoter multi-gene table: $prom_multi_rows rows"
+    else
+        check_warn "Promoter multi-gene table missing or empty"
+    fi
+
+    enh_multi="$integration_dir/enhancer_multigene.tsv"
+    if [[ -s "$enh_multi" ]]; then
+        enh_multi_rows=$(($(wc -l < "$enh_multi") - 1))
+        check_pass "Enhancer multi-gene table: $enh_multi_rows rows"
+    else
+        check_warn "Enhancer multi-gene table missing or empty"
+    fi
+
+    prom_da="$integration_dir/promoter_DA.csv"
+    if [[ -s "$prom_da" ]]; then
+        check_pass "Promoter DA results exist"
+    else
+        check_warn "Promoter DA results missing"
+    fi
+
+    enh_da="$integration_dir/enhancer_DA.csv"
+    if [[ -s "$enh_da" ]]; then
+        check_pass "Enhancer DA results exist"
+    else
+        check_warn "Enhancer DA results missing"
+    fi
+else
+    check_warn "Gene integration directory not found (optional analysis)"
+fi
+
+# -----------------------------------------------------------------------------
+# 13. Sensitivity analysis
+# -----------------------------------------------------------------------------
+echo ""
+echo "--- Checking sensitivity analysis ---"
+
+if [[ -d "$ANALYSIS_DIR/gene_integration/sensitivity" ]]; then
+    sensitivity_summary="$ANALYSIS_DIR/gene_integration/sensitivity/summary.tsv"
+    if [[ -s "$sensitivity_summary" ]]; then
+        sensitivity_rows=$(($(wc -l < "$sensitivity_summary") - 1))
+        check_pass "Sensitivity analysis summary: $sensitivity_rows window configurations"
+    else
+        check_warn "Sensitivity analysis summary missing or empty"
+    fi
+else
+    check_warn "Sensitivity analysis directory not found (optional analysis)"
+fi
+
+# -----------------------------------------------------------------------------
+# 14. Driver inference
+# -----------------------------------------------------------------------------
+echo ""
+echo "--- Checking driver inference ---"
+
+driver_tiered="$ANALYSIS_DIR/gene_integration/driver_candidates_tiered.csv"
+driver_summary="$ANALYSIS_DIR/gene_integration/driver_evidence_summary.txt"
+
+if [[ -s "$driver_tiered" ]]; then
+    driver_count=$(($(wc -l < "$driver_tiered") - 1))
+    check_pass "Driver candidates (tiered): $driver_count genes"
+else
+    check_warn "Driver candidates file not found (optional analysis)"
+fi
+
+if [[ -s "$driver_summary" ]]; then
+    check_pass "Driver evidence summary exists"
+else
+    check_warn "Driver evidence summary not found (optional analysis)"
 fi
 
 # -----------------------------------------------------------------------------

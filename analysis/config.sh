@@ -60,6 +60,52 @@ export ATAC_HOMER_MOTIF_LEN="8,10,12"
 export ATAC_KEEP_INTERMEDIATES=0
 
 # -----------------------------------------------------------------------------
+# IDR
+# -----------------------------------------------------------------------------
+export ATAC_IDR_ENABLED=1
+export ATAC_IDR_THRESHOLD=0.05       # ENCODE standard
+export ATAC_IDR_MIN_REPS=2           # minimum reps per condition to attempt IDR
+# IDR mode: "encode" (pooled+pseudorep) or "pairwise" (simplified)
+export ATAC_IDR_MODE="encode"
+
+# -----------------------------------------------------------------------------
+# EXTENDED QC
+# -----------------------------------------------------------------------------
+export ATAC_TSS_BED=""               # auto-generated from GTF if empty
+# QC failure policy: "warn" (log warning, continue) or "exclude" (drop sample from DA)
+export ATAC_QC_FAIL_POLICY="warn"
+# Thresholds (ENCODE minimums)
+export ATAC_QC_FRIP_MIN=0.1
+export ATAC_QC_TSS_ENRICH_MIN=5
+export ATAC_QC_NFR_RATIO_MIN=1.0
+
+# -----------------------------------------------------------------------------
+# PEAK-TO-GENE ASSIGNMENT
+# -----------------------------------------------------------------------------
+export ATAC_PROMOTER_WINDOW=2000
+export ATAC_ENHANCER_MAX=50000
+export ATAC_DISTANCE_DECAY=10000     # weight = 1/(1 + dist/decay)
+export ATAC_MAX_DISTAL_GENES=5       # cap distal (enhancer) links per peak
+# Sensitivity sweep windows (comma-separated, run if non-empty)
+export ATAC_SENSITIVITY_WINDOWS=""   # e.g. "25000,50000,100000"
+
+# -----------------------------------------------------------------------------
+# MULTI-METHOD DA CONCORDANCE
+# -----------------------------------------------------------------------------
+export ATAC_CONCORDANCE_ENABLED=1
+
+# -----------------------------------------------------------------------------
+# OPTIONAL COVARIATE
+# -----------------------------------------------------------------------------
+# Column name in samples.tsv to include as covariate (e.g. "batch"); empty = none
+export ATAC_COVARIATE=""
+
+# -----------------------------------------------------------------------------
+# DRIVER INFERENCE
+# -----------------------------------------------------------------------------
+export ATAC_DRIVER_INFERENCE=1
+
+# -----------------------------------------------------------------------------
 # CONDITION PATTERNS (fallback if samples.tsv missing)
 # -----------------------------------------------------------------------------
 export ATAC_WT_PATTERN="ATF5WT"
