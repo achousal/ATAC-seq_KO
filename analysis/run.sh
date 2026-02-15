@@ -34,6 +34,9 @@
 set -euo pipefail
 IFS=$'\n\t'
 
+# Prevent system PYTHONPATH from overriding conda environment packages
+unset PYTHONPATH
+
 # -----------------------------------------------------------------------------
 # Logging
 # -----------------------------------------------------------------------------
@@ -78,6 +81,9 @@ DRY_RUN=0
 VALIDATE_ONLY=0
 RNA_DEG_FILE=""
 GTF_FILE=""
+COVARIATE="${ATAC_COVARIATE:-}"
+SKIP_CONCORDANCE=0
+SKIP_DRIVERS=0
 
 # -----------------------------------------------------------------------------
 # Parse arguments
@@ -94,6 +100,9 @@ while [[ $# -gt 0 ]]; do
         --gtf)            GTF_FILE="$2"; shift 2 ;;
         --dry-run)        DRY_RUN=1; shift ;;
         --validate)       VALIDATE_ONLY=1; shift ;;
+        --covariate)      COVARIATE="$2"; shift 2 ;;
+        --skip-concordance) SKIP_CONCORDANCE=1; shift ;;
+        --skip-drivers)   SKIP_DRIVERS=1; shift ;;
         -h|--help)        usage; exit 0 ;;
         *)                die "Unknown argument: $1 (use --help)" ;;
     esac
@@ -114,10 +123,19 @@ log "SKIP_ATAC:   $SKIP_ATAC"
 log "SKIP_INTEGRATE: $SKIP_INTEGRATE"
 log "SKIP_FIGURES: $SKIP_FIGURES"
 log "FORCE:       $FORCE"
+log "COVARIATE:   ${COVARIATE:-none}"
+log "CONCORDANCE: ${ATAC_CONCORDANCE_ENABLED:-0}"
+log "DRIVERS:     ${ATAC_DRIVER_INFERENCE:-0}"
 log "=========================================="
 
 if [[ $DRY_RUN -eq 1 ]]; then
     log "[DRY-RUN] Would execute pipeline with above settings"
+    log "[DRY-RUN] Stages:"
+    [[ $SKIP_ATAC -eq 0 ]] && log "  1. ATAC processing"
+    [[ $SKIP_CONCORDANCE -eq 0 && "${ATAC_CONCORDANCE_ENABLED:-0}" -eq 1 ]] && log "  1.5. DA concordance"
+    [[ $SKIP_INTEGRATE -eq 0 && -n "$RNA_DEG_FILE" ]] && log "  2. RNA+ATAC integration"
+    [[ $SKIP_DRIVERS -eq 0 && "${ATAC_DRIVER_INFERENCE:-0}" -eq 1 ]] && log "  2.5. Driver inference"
+    [[ $SKIP_FIGURES -eq 0 ]] && log "  3. Figure generation"
     exit 0
 fi
 
@@ -156,6 +174,40 @@ UNION_PEAKS="${MACS_DIR}/union_peaks.bed"
 log "ATAC-seq outputs validated"
 
 # =============================================================================
+# STAGE 1.5: Multi-method DA Concordance
+# =============================================================================
+log "STAGE 1.5: Multi-method DA Concordance"
+CONCORDANCE_DIR="${ATAC_BASE}/analysis/subread/concordance"
+
+if [[ $SKIP_CONCORDANCE -eq 1 ]]; then
+    skip "Concordance (--skip-concordance)"
+elif [[ "${ATAC_CONCORDANCE_ENABLED:-0}" -ne 1 ]]; then
+    skip "Concordance disabled (ATAC_CONCORDANCE_ENABLED=0)"
+else
+    CONCORDANCE_CSV="${CONCORDANCE_DIR}/DA_comparison.csv"
+    FC_OUT="${ATAC_BASE}/analysis/subread/union_peaks_featureCounts.txt"
+    SAMPLE_META="${ATAC_SAMPLE_META:-${SCRIPT_DIR}/samples.tsv}"
+
+    if [[ $FORCE -eq 0 ]] && checkpoint "$CONCORDANCE_CSV" "Concordance results"; then
+        log "Concordance analysis already done"
+    else
+        if have Rscript && [[ -f "${SCRIPT_DIR}/da_concordance.R" ]]; then
+            have module && module load R/4.2.0 2>/dev/null || true
+
+            log "Running multi-method DA concordance"
+            CONC_ARGS="--counts $FC_OUT --metadata $SAMPLE_META --deseq2 $DA_RESULTS --outdir $CONCORDANCE_DIR"
+            if [[ -n "$COVARIATE" ]]; then
+                CONC_ARGS="$CONC_ARGS --covariate $COVARIATE"
+            fi
+            Rscript "${SCRIPT_DIR}/da_concordance.R" $CONC_ARGS \
+                2>&1 | tee "${LOG_DIR}/concordance.$(date +%Y%m%d_%H%M%S).log"
+        else
+            warn "da_concordance.R not found or Rscript unavailable; skipping concordance"
+        fi
+    fi
+fi
+
+# =============================================================================
 # STAGE 2: Peak-to-Gene Integration
 # =============================================================================
 log "STAGE 2: Peak-to-Gene Integration"
@@ -171,6 +223,7 @@ else
     
     mkdir -p "$INTEGRATION_DIR"
     MERGED_CSV="${INTEGRATION_DIR}/genelevel_RNA_Prom_Enh_merged.csv"
+    INTEGRATED_RANKED_CSV="${INTEGRATION_DIR}/integrated_genes_ranked.csv"
     
     # Step 2a: Peak-to-gene mapping
     if [[ $FORCE -eq 0 ]] && checkpoint "${INTEGRATION_DIR}/promoter_DA.csv" "Promoter DA"; then
@@ -186,7 +239,7 @@ else
     fi
     
     # Step 2b: RNA+ATAC merge and figures
-    if [[ $FORCE -eq 0 ]] && checkpoint "$MERGED_CSV" "Gene-level merge"; then
+    if [[ $FORCE -eq 0 && -s "$MERGED_CSV" && -s "$INTEGRATED_RANKED_CSV" ]]; then
         log "RNA+ATAC merge already done"
     else
         if have Rscript && [[ -f "${SCRIPT_DIR}/rna_atac_figures.R" ]]; then
@@ -215,6 +268,50 @@ else
             done
         else
             warn "rna_atac_figures.R not found or Rscript unavailable"
+        fi
+    fi
+fi
+
+# =============================================================================
+# STAGE 2.5: Driver Inference
+# =============================================================================
+log "STAGE 2.5: Driver Inference"
+
+if [[ $SKIP_DRIVERS -eq 1 ]]; then
+    skip "Driver inference (--skip-drivers)"
+elif [[ "${ATAC_DRIVER_INFERENCE:-0}" -ne 1 ]]; then
+    skip "Driver inference disabled (ATAC_DRIVER_INFERENCE=0)"
+elif [[ $SKIP_INTEGRATE -eq 1 || -z "$RNA_DEG_FILE" ]]; then
+    skip "Driver inference requires integration (RNA DEG file)"
+else
+    DRIVER_DIR="${INTEGRATION_DIR}"
+    DRIVER_CSV="${DRIVER_DIR}/driver_candidates_tiered.csv"
+
+    if [[ $FORCE -eq 0 ]] && checkpoint "$DRIVER_CSV" "Driver candidates"; then
+        log "Driver inference already done"
+    else
+        if have Rscript && [[ -f "${SCRIPT_DIR}/driver_inference.R" ]]; then
+            have module && module load R/4.2.0 2>/dev/null || true
+
+            RANKED_CSV="${INTEGRATION_DIR}/integrated_genes_ranked.csv"
+            HOMER_DIR="${ATAC_BASE}/analysis/homer"
+            HOMER_UP="${HOMER_DIR}/motifs_KO_up"
+            HOMER_DOWN="${HOMER_DIR}/motifs_KO_down"
+
+            if [[ -s "$RANKED_CSV" ]]; then
+                log "Running driver inference"
+                Rscript "${SCRIPT_DIR}/driver_inference.R" \
+                    --ranked "$RANKED_CSV" \
+                    --homer_up "$HOMER_UP" \
+                    --homer_down "$HOMER_DOWN" \
+                    --rna_deg "$RNA_DEG_FILE" \
+                    --outdir "$DRIVER_DIR" \
+                    2>&1 | tee "${LOG_DIR}/driver_inference.$(date +%Y%m%d_%H%M%S).log"
+            else
+                warn "Integrated ranking not found; skipping driver inference"
+            fi
+        else
+            warn "driver_inference.R not found or Rscript unavailable"
         fi
     fi
 fi
@@ -473,6 +570,12 @@ log "  Peaks:      $UNION_PEAKS"
 log "  MultiQC:    ${ATAC_BASE}/analysis/multiqc/multiqc_report.html"
 [[ -f "${INTEGRATION_DIR}/genelevel_RNA_Prom_Enh_merged.csv" ]] && \
     log "  Integration: ${INTEGRATION_DIR}/genelevel_RNA_Prom_Enh_merged.csv"
+[[ -f "${INTEGRATION_DIR}/integrated_genes_ranked.csv" ]] && \
+    log "  Integrated ranking: ${INTEGRATION_DIR}/integrated_genes_ranked.csv"
+[[ -f "${CONCORDANCE_DIR}/DA_comparison.csv" ]] && \
+    log "  Concordance: ${CONCORDANCE_DIR}/DA_comparison.csv"
+[[ -f "${INTEGRATION_DIR}/driver_candidates_tiered.csv" ]] && \
+    log "  Drivers: ${INTEGRATION_DIR}/driver_candidates_tiered.csv"
 log ""
 log "Figures: $FIGURES_DIR"
 log "Tables:  $TABLES_DIR"

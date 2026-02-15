@@ -33,6 +33,7 @@ check_package("dplyr")
 check_package("ggplot2")
 check_package("stringr")
 check_package("tibble")
+check_package("optparse")
 
 suppressPackageStartupMessages({
   library(readr)
@@ -47,16 +48,58 @@ suppressPackageStartupMessages({
 # =============================================================================
 args <- commandArgs(trailingOnly = TRUE)
 
-if (length(args) < 2) {
-  stop("Usage: Rscript deseq_atac.R <featureCounts.txt> <output_dir> [samples.tsv]\n       Rscript deseq_atac.R <deseq_results.csv> <output_dir> --figures-only [gene_map.tsv]",
-       call. = FALSE)
-}
+# Detect whether optparse-style (--flag) arguments are used
+use_optparse <- any(grepl("^--", args))
 
-input_file <- args[1]
-out_dir <- args[2]
-figures_only <- "--figures-only" %in% args
-gene_map_file <- if (figures_only && length(args) >= 4 && args[4] != "--figures-only") args[4] else NULL
-meta_file <- if (!figures_only && length(args) >= 3 && args[3] != "--figures-only") args[3] else NULL
+if (use_optparse) {
+  suppressPackageStartupMessages(library(optparse))
+
+  option_list <- list(
+    make_option(c("--counts"), type = "character", default = NULL,
+                help = "featureCounts output file or DESeq2 results CSV", metavar = "FILE"),
+    make_option(c("--outdir"), type = "character", default = NULL,
+                help = "Output directory for results", metavar = "DIR"),
+    make_option(c("--metadata"), type = "character", default = NULL,
+                help = "Sample metadata TSV (sample, condition, replicate, [covariate])", metavar = "FILE"),
+    make_option(c("--covariate"), type = "character", default = NULL,
+                help = "Optional covariate column name for design formula (~covariate + condition)", metavar = "NAME"),
+    make_option(c("--figures-only"), action = "store_true", default = FALSE,
+                help = "Skip DESeq2 analysis and generate figures only"),
+    make_option(c("--gene-map"), type = "character", default = NULL,
+                help = "Gene mapping TSV for figure labels (used with --figures-only)", metavar = "FILE")
+  )
+
+  parser <- OptionParser(option_list = option_list,
+                         description = "DESeq2 differential accessibility analysis for ATAC-seq")
+  opt <- parse_args(parser)
+
+  # Validate required arguments
+  if (is.null(opt$counts) || is.null(opt$outdir)) {
+    stop("Required arguments: --counts, --outdir", call. = FALSE)
+  }
+
+  input_file <- opt$counts
+  out_dir <- opt$outdir
+  figures_only <- opt$`figures-only`
+  gene_map_file <- opt$`gene-map`
+  meta_file <- opt$metadata
+
+} else {
+  # Positional argument parsing (backward compatibility)
+  if (length(args) < 2) {
+    stop("Usage: Rscript deseq_atac.R <featureCounts.txt> <output_dir> [samples.tsv]\n       Rscript deseq_atac.R <deseq_results.csv> <output_dir> --figures-only [gene_map.tsv]",
+         call. = FALSE)
+  }
+
+  input_file <- args[1]
+  out_dir <- args[2]
+  figures_only <- "--figures-only" %in% args
+  gene_map_file <- if (figures_only && length(args) >= 4 && args[4] != "--figures-only") args[4] else NULL
+  meta_file <- if (!figures_only && length(args) >= 3 && args[3] != "--figures-only") args[3] else NULL
+
+  # Create opt structure for consistency
+  opt <- list(covariate = NULL)
+}
 
 if (!file.exists(input_file)) {
   stop(sprintf("[ERROR] Input file not found: %s", input_file), call. = FALSE)
@@ -364,11 +407,25 @@ if (any(is.na(coldata$condition))) {
 # =============================================================================
 # DESeq2 ANALYSIS
 # =============================================================================
+# Build design formula with optional covariate
+design_formula <- if (!is.null(opt$covariate) && nzchar(opt$covariate)) {
+  if (!opt$covariate %in% colnames(coldata)) {
+    stop(sprintf("[ERROR] Covariate '%s' not found in metadata columns: %s",
+                 opt$covariate, paste(colnames(coldata), collapse = ", ")), call. = FALSE)
+  }
+  coldata[[opt$covariate]] <- factor(coldata[[opt$covariate]])
+  message(sprintf("[DESeq2] Using design formula: ~%s + condition", opt$covariate))
+  as.formula(paste0("~", opt$covariate, " + condition"))
+} else {
+  message("[DESeq2] Using design formula: ~condition")
+  ~condition
+}
+
 message("[DESeq2] Creating DESeqDataSet")
 dds <- DESeqDataSetFromMatrix(
   countData = counts,
   colData = coldata,
-  design = ~condition
+  design = design_formula
 )
 
 # Filter low-count peaks
@@ -389,8 +446,15 @@ res <- lfcShrink(dds, coef = "condition_KO_vs_WT", type = "apeglm")
 # =============================================================================
 # SAVE RESULTS
 # =============================================================================
+# Extract unshrunk results to guarantee raw pvalue and stat columns
+res_unshrunk <- results(dds, name = "condition_KO_vs_WT")
 res_tbl <- as.data.frame(res) %>%
   rownames_to_column("peak_id") %>%
+  mutate(
+    pvalue = as.data.frame(res_unshrunk)[match(peak_id, rownames(res_unshrunk)), "pvalue"],
+    stat   = as.data.frame(res_unshrunk)[match(peak_id, rownames(res_unshrunk)), "stat"],
+    log2FoldChange_unshrunken = as.data.frame(res_unshrunk)[match(peak_id, rownames(res_unshrunk)), "log2FoldChange"]
+  ) %>%
   arrange(padj, desc(abs(log2FoldChange)))
 
 out_file <- file.path(out_dir, "DA_results_DESeq2.csv")

@@ -23,66 +23,141 @@ clean_ens <- function(x) {
   gsub("\\.\\d+$", "", x)
 }
 
-# Collapse peak-level DA to gene-level using the "best peak" rule:
-# best = min padj (NA last); tie-break = max abs(log2FC)
+stouffer_combine <- function(pvals, lfcs, weights = NULL) {
+  p <- as.numeric(pvals)
+  fc <- as.numeric(lfcs)
+  keep <- is.finite(p) & p > 0 & p < 1 & is.finite(fc)
+  p <- p[keep]; fc <- fc[keep]
+  if (length(p) == 0) return(list(pvalue = NA_real_, direction = NA_character_))
+  z <- sign(fc) * qnorm(1 - p / 2)
+  if (!is.null(weights)) {
+    w <- as.numeric(weights)[keep]
+    z_combined <- sum(w * z) / sqrt(sum(w^2))
+  } else {
+    z_combined <- sum(z) / sqrt(length(z))
+  }
+  p_combined <- 2 * pnorm(-abs(z_combined))
+  dir <- if (z_combined > 0) "up" else if (z_combined < 0) "down" else "ambiguous"
+  list(pvalue = p_combined, direction = dir)
+}
+
+# Collapse peak-level DA to gene-level using signed Stouffer's Z
 collapse_peak_to_gene <- function(da_df, map_df, alpha = 0.05) {
+  # Validate raw pvalue column
+  if (!"pvalue" %in% colnames(da_df)) {
+    # Try fallback columns
+    pval_col <- intersect(colnames(da_df), c("pvalue", "pval", "p_value"))
+    if (length(pval_col) == 0) {
+      stop("DA results missing raw 'pvalue' column. Re-run deseq_atac.R (updated version) to generate it.",
+           call. = FALSE)
+    }
+    da_df$pvalue <- da_df[[pval_col[1]]]
+  }
+
   da2 <- da_df %>%
     mutate(
       peak_id = as.character(peak_id),
       padj = as.numeric(padj),
+      pvalue = as.numeric(pvalue),
       log2FoldChange = as.numeric(log2FoldChange)
     )
 
-  map2 <- map_df %>%
-    transmute(
-      peak_id = as.character(peak_id),
-      gene_id_clean = clean_ens(gene_id),
-      gene_name = as.character(gene_name)
-    )
+  # Detect 7-column (weighted) vs 6-column (legacy) map files
+  has_weight <- ncol(map_df) >= 7
+  if (has_weight) {
+    map2 <- map_df %>%
+      transmute(
+        peak_id = as.character(.[[1]]),
+        gene_id_clean = clean_ens(.[[2]]),
+        gene_name = as.character(.[[3]]),
+        weight = as.numeric(.[[7]])
+      )
+  } else {
+    map2 <- map_df %>%
+      transmute(
+        peak_id = as.character(.[[1]]),
+        gene_id_clean = clean_ens(.[[2]]),
+        gene_name = as.character(.[[3]])
+      )
+  }
 
   joined <- inner_join(map2, da2, by = "peak_id")
   if (nrow(joined) == 0) {
     return(tibble(
-      gene_id_clean = character(),
-      n_peaks = integer(),
-      n_sig = integer(),
-      best_peak_id = character(),
-      best_log2FC = double(),
-      best_padj = double(),
-      mean_log2FC = double(),
-      median_log2FC = double()
+      gene_id_clean = character(), n_peaks = integer(), n_sig = integer(),
+      best_peak_id = character(), best_log2FC = double(), best_padj = double(),
+      combined_pvalue = double(), combined_padj = double(),
+      combined_direction = character(), weighted_log2FC = double(),
+      mean_log2FC = double(), median_log2FC = double()
     ))
   }
 
+  # Stouffer combination per gene
+  gene_stats <- joined %>%
+    group_by(gene_id_clean) %>%
+    summarise(
+      n_peaks = n(),
+      n_sig = sum(!is.na(padj) & padj < alpha),
+      stouffer = {
+        w <- if (has_weight && "weight" %in% names(cur_data())) weight else NULL
+        list(stouffer_combine(pvalue, log2FoldChange, w))
+      },
+      weighted_log2FC = if (has_weight && "weight" %in% names(cur_data())) {
+        wt <- weight / sum(weight)
+        sum(wt * log2FoldChange, na.rm = TRUE)
+      } else {
+        mean(log2FoldChange, na.rm = TRUE)
+      },
+      mean_log2FC = mean(log2FoldChange, na.rm = TRUE),
+      median_log2FC = median(log2FoldChange, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    mutate(
+      combined_pvalue = sapply(stouffer, function(x) x$pvalue),
+      combined_direction = sapply(stouffer, function(x) x$direction)
+    ) %>%
+    select(-stouffer)
+
+  # BH correction AFTER combination
+  gene_stats$combined_padj <- p.adjust(gene_stats$combined_pvalue, method = "BH")
+
+  # Best peak per gene (legacy compat)
   best_rows <- joined %>%
     group_by(gene_id_clean) %>%
     arrange(is.na(padj), padj, desc(abs(log2FoldChange))) %>%
     slice(1) %>%
     ungroup() %>%
-    transmute(
-      gene_id_clean,
-      best_peak_id = peak_id,
-      best_log2FC = log2FoldChange,
-      best_padj = padj
-    )
+    transmute(gene_id_clean, best_peak_id = peak_id, best_log2FC = log2FoldChange, best_padj = padj)
 
-  summ <- joined %>%
-    group_by(gene_id_clean) %>%
-    summarise(
-      n_peaks = n(),
-      n_sig = sum(!is.na(padj) & padj < alpha),
-      mean_log2FC = mean(log2FoldChange, na.rm = TRUE),
-      median_log2FC = median(log2FoldChange, na.rm = TRUE),
-      .groups = "drop"
-    )
-
-  left_join(summ, best_rows, by = "gene_id_clean")
+  left_join(gene_stats, best_rows, by = "gene_id_clean")
 }
 
 qrange <- function(v) {
   v <- v[is.finite(v)]
   if (length(v) < 10) return(NULL)
   as.numeric(quantile(v, probs = c(0.01, 0.99), na.rm = TRUE))
+}
+
+modality_rank <- function(padj, log2fc) {
+  p <- as.numeric(padj)
+  fc <- as.numeric(log2fc)
+
+  p[!is.finite(p)] <- 1
+  fc[!is.finite(fc)] <- 0
+  p <- pmin(pmax(p, 1e-300), 1)
+
+  ord <- order(p, -abs(fc))
+  ranks <- integer(length(p))
+  ranks[ord] <- seq_along(ord)
+  ranks
+}
+
+harmonic_mean_p <- function(pvals) {
+  p <- as.numeric(pvals)
+  p <- p[is.finite(p)]
+  if (length(p) == 0) return(NA_real_)
+  p <- pmin(pmax(p, 1e-300), 1)
+  length(p) / sum(1 / p)
 }
 
 select_panel_labels <- function(df, sig_cols, padj_cols, lfc_cols, top_n = 30) {
@@ -287,16 +362,18 @@ dir.create(figdir, recursive = TRUE, showWarnings = FALSE)
 msg("Figdir: %s", figdir)
 
 # ---------------- load prep outputs ----------------
-prom_map <- read_tsv(
-  prom_map_file,
-  col_names = c("peak_id","gene_id","gene_name","strand","dist_bp","abs_dist"),
-  show_col_types = FALSE
-)
-enh_map <- read_tsv(
-  enh_map_file,
-  col_names = c("peak_id","gene_id","gene_name","strand","dist_bp","abs_dist"),
-  show_col_types = FALSE
-)
+# Auto-detect 7-col (weighted) vs 6-col (legacy) map files
+load_map <- function(path) {
+  tmp <- read_tsv(path, col_names = FALSE, show_col_types = FALSE)
+  if (ncol(tmp) >= 7) {
+    colnames(tmp) <- c("peak_id","gene_id","gene_name","strand","dist_bp","abs_dist","weight")[seq_len(ncol(tmp))]
+  } else {
+    colnames(tmp) <- c("peak_id","gene_id","gene_name","strand","dist_bp","abs_dist")[seq_len(ncol(tmp))]
+  }
+  tmp
+}
+prom_map <- load_map(prom_map_file)
+enh_map  <- load_map(enh_map_file)
 
 prom_da <- read_csv(prom_da_file, show_col_types = FALSE)
 enh_da  <- read_csv(enh_da_file, show_col_types = FALSE)
@@ -315,6 +392,7 @@ gene_id_col <- intersect(names(rna), c("gene_id","GeneID","ensembl_gene_id","id"
 gene_name_col <- intersect(names(rna), c("gene_name","symbol","GeneName","external_gene_name","gene"))
 lfc_col  <- intersect(names(rna), c("log2FoldChange","log2FC","lfc"))
 padj_col <- intersect(names(rna), c("padj","adj_pval","FDR","qval","q_value"))
+pval_raw_col <- intersect(names(rna), c("pvalue", "pval", "p_value"))
 
 if (length(gene_id_col) == 0) stop("RNA DEGs missing gene_id-like column.")
 if (length(lfc_col) == 0) stop("RNA DEGs missing log2FoldChange-like column.")
@@ -330,7 +408,13 @@ rna2 <- rna %>%
     gene_id_clean = clean_ens(.data[[gene_id_col]]),
     gene_label = if (!is.null(gene_name_col)) as.character(.data[[gene_name_col]]) else clean_ens(.data[[gene_id_col]]),
     rna_log2FC = as.numeric(.data[[lfc_col]]),
-    rna_padj = as.numeric(.data[[padj_col]])
+    rna_padj = as.numeric(.data[[padj_col]]),
+    rna_pvalue = if (length(pval_raw_col) > 0) {
+      as.numeric(.data[[pval_raw_col[1]]])
+    } else {
+      warning("RNA DEGs missing raw pvalue column; using padj as fallback for HMP (conservative)")
+      as.numeric(.data[[padj_col]])
+    }
   ) %>%
   distinct(gene_id_clean, .keep_all = TRUE)
 
@@ -340,14 +424,22 @@ gene_merged <- rna2 %>%
   left_join(enh_gene,  by = "gene_id_clean") %>%
   mutate(
     rna_sig  = !is.na(rna_padj) & rna_padj < opt$alpha,
-    prom_sig = !is.na(prom_best_padj) & prom_best_padj < opt$alpha,
-    enh_sig  = !is.na(enh_best_padj) & enh_best_padj < opt$alpha,
+    prom_sig = !is.na(prom_combined_padj) & prom_combined_padj < opt$alpha,
+    enh_sig  = !is.na(enh_combined_padj) & enh_combined_padj < opt$alpha,
     sig_class = case_when(
       rna_sig & (prom_sig | enh_sig) ~ "RNA + ATAC",
       rna_sig ~ "RNA only",
       (prom_sig | enh_sig) ~ "ATAC only",
       TRUE ~ "not sig"
     )
+  )
+
+# Modality-specific ranks for robust rank aggregation
+gene_merged <- gene_merged %>%
+  mutate(
+    rna_rank = modality_rank(rna_padj, rna_log2FC),
+    prom_rank = modality_rank(prom_combined_padj, prom_weighted_log2FC),
+    enh_rank = modality_rank(enh_combined_padj, enh_weighted_log2FC)
   )
 
 write_csv(gene_merged, file.path(opt$datadir, "genelevel_RNA_Prom_Enh_merged.csv"))
@@ -358,10 +450,74 @@ top_rna <- gene_merged %>%
 
 write_csv(top_rna, file.path(opt$datadir, sprintf("top%d_RNA_genes.csv", opt$topN)))
 
+n_genes_total <- nrow(gene_merged)
+
+integrated_ranked <- gene_merged %>%
+  filter(rna_sig & (prom_sig | enh_sig)) %>%
+  rowwise() %>%
+  mutate(
+    n_sig_modalities = 1L + as.integer(prom_sig) + as.integer(enh_sig),
+    rank_product = exp(mean(log(c(
+      rna_rank,
+      if (isTRUE(prom_sig)) prom_rank else NULL,
+      if (isTRUE(enh_sig)) enh_rank else NULL
+    )))),
+    rank_product_norm = rank_product / n_genes_total,
+    integrated_rank_score = -log10(pmax(rank_product_norm, 1e-300)),
+    hmp_raw = harmonic_mean_p(c(
+      rna_pvalue,
+      if (isTRUE(prom_sig)) prom_combined_pvalue else NULL,
+      if (isTRUE(enh_sig)) enh_combined_pvalue else NULL
+    )),
+    hmp_neglog10 = -log10(pmax(hmp_raw, 1e-300)),
+    atac_best_layer = case_when(
+      isTRUE(prom_sig) & isTRUE(enh_sig) ~ ifelse(
+        ifelse(is.na(prom_combined_padj), 1, prom_combined_padj) <= ifelse(is.na(enh_combined_padj), 1, enh_combined_padj),
+        "promoter",
+        "enhancer"
+      ),
+      isTRUE(prom_sig) ~ "promoter",
+      isTRUE(enh_sig) ~ "enhancer",
+      TRUE ~ NA_character_
+    ),
+    atac_best_log2FC = case_when(
+      atac_best_layer == "promoter" ~ prom_best_log2FC,
+      atac_best_layer == "enhancer" ~ enh_best_log2FC,
+      TRUE ~ NA_real_
+    ),
+    direction_relation = case_when(
+      is.na(rna_log2FC) | is.na(atac_best_log2FC) ~ NA_character_,
+      rna_log2FC == 0 | atac_best_log2FC == 0 ~ "ambiguous",
+      sign(rna_log2FC) == sign(atac_best_log2FC) ~ "concordant",
+      TRUE ~ "discordant"
+    )
+  ) %>%
+  ungroup() %>%
+  mutate(hmp_evidence_score = p.adjust(hmp_raw, method = "BH")) %>%
+  arrange(desc(n_sig_modalities), rank_product, hmp_evidence_score, desc(abs(rna_log2FC))) %>%
+  mutate(integrated_rank = row_number())
+
+# Write integrated ranking with header comment
+integrated_csv_path <- file.path(opt$datadir, "integrated_genes_ranked.csv")
+cat("# Integrated gene ranking (RNA+ATAC)\n", file = integrated_csv_path)
+cat("# hmp_evidence_score: BH-adjusted harmonic mean p-value (evidence ranking, not formal significance)\n", file = integrated_csv_path, append = TRUE)
+cat("# Formal significance calls: rna_sig, prom_sig, enh_sig (based on modality-specific padj)\n", file = integrated_csv_path, append = TRUE)
+cat("# Combined p-values: prom_combined_padj, enh_combined_padj (Stouffer's Z on raw p-values, then BH)\n", file = integrated_csv_path, append = TRUE)
+write_csv(integrated_ranked, integrated_csv_path, append = TRUE)
+
+top_integrated <- integrated_ranked %>%
+  slice_head(n = opt$topN)
+
+write_csv(top_integrated, file.path(opt$datadir, "top_integrated_genes.csv"))
+write_csv(top_integrated, file.path(opt$datadir, sprintf("top%d_integrated_genes.csv", opt$topN)))
+
 # ---------------- summary stats ----------------
 summ <- tibble(
   n_genes_rna = nrow(rna2),
   n_genes_merged = nrow(gene_merged),
+  n_integrated_ranked = nrow(integrated_ranked),
+  n_integrated_concordant = sum(integrated_ranked$direction_relation == "concordant", na.rm = TRUE),
+  n_integrated_discordant = sum(integrated_ranked$direction_relation == "discordant", na.rm = TRUE),
   n_rna_sig = sum(gene_merged$rna_sig, na.rm = TRUE),
   n_prom_sig = sum(gene_merged$prom_sig, na.rm = TRUE),
   n_enh_sig = sum(gene_merged$enh_sig, na.rm = TRUE),
@@ -383,7 +539,7 @@ df_prom_enh <- gene_merged %>% filter(!is.na(prom_best_log2FC), !is.na(enh_best_
 label_genes_rna_prom <- select_panel_labels(
   df_rna_prom,
   sig_cols = c("rna_sig", "prom_sig"),
-  padj_cols = c("rna_padj", "prom_best_padj"),
+  padj_cols = c("rna_padj", "prom_combined_padj"),
   lfc_cols = c("rna_log2FC", "prom_best_log2FC"),
   top_n = opt$topN
 )
@@ -391,7 +547,7 @@ label_genes_rna_prom <- select_panel_labels(
 label_genes_rna_enh <- select_panel_labels(
   df_rna_enh,
   sig_cols = c("rna_sig", "enh_sig"),
-  padj_cols = c("rna_padj", "enh_best_padj"),
+  padj_cols = c("rna_padj", "enh_combined_padj"),
   lfc_cols = c("rna_log2FC", "enh_best_log2FC"),
   top_n = opt$topN
 )
@@ -399,7 +555,7 @@ label_genes_rna_enh <- select_panel_labels(
 label_genes_prom_enh <- select_panel_labels(
   df_prom_enh,
   sig_cols = c("prom_sig", "enh_sig"),
-  padj_cols = c("prom_best_padj", "enh_best_padj"),
+  padj_cols = c("prom_combined_padj", "enh_combined_padj"),
   lfc_cols = c("prom_best_log2FC", "enh_best_log2FC"),
   top_n = opt$topN
 )
@@ -464,6 +620,9 @@ msg("Figures in: %s", figdir)
 msg("Key outputs:")
 msg("  genelevel_RNA_Prom_Enh_merged.csv")
 msg("  top%d_RNA_genes.csv", opt$topN)
+msg("  integrated_genes_ranked.csv (RNA+ATAC rank product)")
+msg("  top_integrated_genes.csv")
+msg("  top%d_integrated_genes.csv", opt$topN)
 msg("  summary_stats.csv")
 msg("  Figure1_threepanel_fullrange_RNA_Prom_Enh.png")
 msg("  Figure2_threepanel_DEscale_RNA_Prom_Enh.png")

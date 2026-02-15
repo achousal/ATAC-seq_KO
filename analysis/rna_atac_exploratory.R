@@ -11,6 +11,7 @@
 suppressPackageStartupMessages({
   library(readr)
   library(dplyr)
+  library(tibble)
   library(tidyr)
   library(stringr)
   library(ggplot2)
@@ -33,72 +34,138 @@ clean_ens <- function(x) {
   gsub("\\.\\d+$", "", x)
 }
 
+stouffer_combine <- function(pvals, lfcs, weights = NULL) {
+  p <- as.numeric(pvals)
+  fc <- as.numeric(lfcs)
+  keep <- is.finite(p) & p > 0 & p < 1 & is.finite(fc)
+  p <- p[keep]; fc <- fc[keep]
+  if (length(p) == 0) return(list(pvalue = NA_real_, direction = NA_character_))
+  z <- sign(fc) * qnorm(1 - p / 2)
+  if (!is.null(weights)) {
+    w <- as.numeric(weights)[keep]
+    z_combined <- sum(w * z) / sqrt(sum(w^2))
+  } else {
+    z_combined <- sum(z) / sqrt(length(z))
+  }
+  p_combined <- 2 * pnorm(-abs(z_combined))
+  dir <- if (z_combined > 0) "up" else if (z_combined < 0) "down" else "ambiguous"
+  list(pvalue = p_combined, direction = dir)
+}
+
 collapse_peak_to_gene <- function(da_df, map_df, alpha = 0.05) {
+  # Validate raw pvalue column
+  if (!"pvalue" %in% colnames(da_df)) {
+    pval_col <- intersect(colnames(da_df), c("pvalue", "pval", "p_value"))
+    if (length(pval_col) == 0) {
+      stop("DA results missing raw 'pvalue' column. Re-run deseq_atac.R (updated version) to generate it.",
+           call. = FALSE)
+    }
+    da_df$pvalue <- da_df[[pval_col[1]]]
+  }
+
   da2 <- da_df %>%
     mutate(
       peak_id = as.character(peak_id),
       padj = as.numeric(padj),
+      pvalue = as.numeric(pvalue),
       log2FoldChange = as.numeric(log2FoldChange)
     )
 
-  map2 <- map_df %>%
-    transmute(
-      peak_id = as.character(peak_id),
-      gene_id_clean = clean_ens(gene_id),
-      gene_name = as.character(gene_name)
-    )
+  # Detect 7-column (weighted) vs 6-column (legacy) map files
+  has_weight <- ncol(map_df) >= 7
+  if (has_weight) {
+    map2 <- map_df %>%
+      transmute(
+        peak_id = as.character(.[[1]]),
+        gene_id_clean = clean_ens(.[[2]]),
+        gene_name = as.character(.[[3]]),
+        weight = as.numeric(.[[7]])
+      )
+  } else {
+    map2 <- map_df %>%
+      transmute(
+        peak_id = as.character(.[[1]]),
+        gene_id_clean = clean_ens(.[[2]]),
+        gene_name = as.character(.[[3]])
+      )
+  }
 
   joined <- inner_join(map2, da2, by = "peak_id")
   if (nrow(joined) == 0) {
     return(tibble(
-      gene_id_clean = character(),
-      n_peaks = integer(),
-      n_sig = integer(),
-      best_peak_id = character(),
-      best_log2FC = double(),
-      best_padj = double(),
-      mean_log2FC = double(),
-      median_log2FC = double()
+      gene_id_clean = character(), n_peaks = integer(), n_sig = integer(),
+      best_peak_id = character(), best_log2FC = double(), best_padj = double(),
+      combined_pvalue = double(), combined_padj = double(),
+      combined_direction = character(), weighted_log2FC = double(),
+      mean_log2FC = double(), median_log2FC = double()
     ))
   }
 
+  # Stouffer combination per gene
+  gene_stats <- joined %>%
+    group_by(gene_id_clean) %>%
+    summarise(
+      n_peaks = n(),
+      n_sig = sum(!is.na(padj) & padj < alpha),
+      stouffer = {
+        w <- if (has_weight && "weight" %in% names(cur_data())) weight else NULL
+        list(stouffer_combine(pvalue, log2FoldChange, w))
+      },
+      weighted_log2FC = if (has_weight && "weight" %in% names(cur_data())) {
+        wt <- weight / sum(weight)
+        sum(wt * log2FoldChange, na.rm = TRUE)
+      } else {
+        mean(log2FoldChange, na.rm = TRUE)
+      },
+      mean_log2FC = mean(log2FoldChange, na.rm = TRUE),
+      median_log2FC = median(log2FoldChange, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    mutate(
+      combined_pvalue = sapply(stouffer, function(x) x$pvalue),
+      combined_direction = sapply(stouffer, function(x) x$direction)
+    ) %>%
+    select(-stouffer)
+
+  # BH correction AFTER combination
+  gene_stats$combined_padj <- p.adjust(gene_stats$combined_pvalue, method = "BH")
+
+  # Best peak per gene (legacy compat)
   best_rows <- joined %>%
     group_by(gene_id_clean) %>%
     arrange(is.na(padj), padj, desc(abs(log2FoldChange))) %>%
     slice(1) %>%
     ungroup() %>%
-    transmute(
-      gene_id_clean,
-      best_peak_id = peak_id,
-      best_log2FC = log2FoldChange,
-      best_padj = padj
-    )
+    transmute(gene_id_clean, best_peak_id = peak_id, best_log2FC = log2FoldChange, best_padj = padj)
 
-  summ <- joined %>%
-    group_by(gene_id_clean) %>%
-    summarise(
-      n_peaks = n(),
-      n_sig = sum(!is.na(padj) & padj < alpha),
-      mean_log2FC = mean(log2FoldChange, na.rm = TRUE),
-      median_log2FC = median(log2FoldChange, na.rm = TRUE),
-      .groups = "drop"
-    )
-
-  left_join(summ, best_rows, by = "gene_id_clean")
+  left_join(gene_stats, best_rows, by = "gene_id_clean")
 }
 
 load_and_merge_data <- function(opt) {
-  # Load mapping files
-  prom_map <- read_tsv(
+  # Load mapping files (auto-detect 7-col weighted vs 6-col legacy)
+  prom_map_raw <- read_tsv(
     file.path(opt$datadir, "promoter_closest.tsv"),
-    col_names = c("peak_id", "gene_id", "gene_name", "strand", "dist_bp", "abs_dist"),
-    show_col_types = FALSE
+    col_names = FALSE, show_col_types = FALSE
   )
-  enh_map <- read_tsv(
+  n_prom_cols <- ncol(prom_map_raw)
+  if (n_prom_cols >= 7) {
+    colnames(prom_map_raw) <- c("peak_id", "gene_id", "gene_name", "strand", "dist_bp", "abs_dist", "weight")
+  } else {
+    colnames(prom_map_raw) <- c("peak_id", "gene_id", "gene_name", "strand", "dist_bp", "abs_dist")[seq_len(n_prom_cols)]
+  }
+  prom_map <- prom_map_raw
+
+  enh_map_raw <- read_tsv(
     file.path(opt$datadir, "enhancer_closest.tsv"),
-    col_names = c("peak_id", "gene_id", "gene_name", "strand", "dist_bp", "abs_dist"),
-    show_col_types = FALSE
+    col_names = FALSE, show_col_types = FALSE
   )
+  n_enh_cols <- ncol(enh_map_raw)
+  if (n_enh_cols >= 7) {
+    colnames(enh_map_raw) <- c("peak_id", "gene_id", "gene_name", "strand", "dist_bp", "abs_dist", "weight")
+  } else {
+    colnames(enh_map_raw) <- c("peak_id", "gene_id", "gene_name", "strand", "dist_bp", "abs_dist")[seq_len(n_enh_cols)]
+  }
+  enh_map <- enh_map_raw
 
   # Load DA results
   prom_da <- read_csv(file.path(opt$datadir, "promoter_DA.csv"), show_col_types = FALSE)
@@ -127,12 +194,20 @@ load_and_merge_data <- function(opt) {
   lfc_col <- lfc_col[1]
   padj_col <- padj_col[1]
 
+  pval_raw_col <- intersect(names(rna), c("pvalue", "pval", "p_value"))
+
   rna2 <- rna %>%
     transmute(
       gene_id_clean = clean_ens(.data[[gene_id_col]]),
       gene_label = if (!is.null(gene_name_col)) as.character(.data[[gene_name_col]]) else clean_ens(.data[[gene_id_col]]),
       rna_log2FC = as.numeric(.data[[lfc_col]]),
-      rna_padj = as.numeric(.data[[padj_col]])
+      rna_padj = as.numeric(.data[[padj_col]]),
+      rna_pvalue = if (length(pval_raw_col) > 0) {
+        as.numeric(.data[[pval_raw_col[1]]])
+      } else {
+        warning("RNA DEGs missing raw pvalue column; using padj as fallback")
+        as.numeric(.data[[padj_col]])
+      }
     ) %>%
     distinct(gene_id_clean, .keep_all = TRUE)
 
@@ -142,8 +217,8 @@ load_and_merge_data <- function(opt) {
     left_join(enh_gene, by = "gene_id_clean") %>%
     mutate(
       rna_sig = !is.na(rna_padj) & rna_padj < opt$alpha,
-      prom_sig = !is.na(prom_best_padj) & prom_best_padj < opt$alpha,
-      enh_sig = !is.na(enh_best_padj) & enh_best_padj < opt$alpha,
+      prom_sig = !is.na(prom_combined_padj) & prom_combined_padj < opt$alpha,
+      enh_sig = !is.na(enh_combined_padj) & enh_combined_padj < opt$alpha,
       any_sig = rna_sig | prom_sig | enh_sig,
       sig_class = case_when(
         rna_sig & (prom_sig | enh_sig) ~ "RNA + ATAC",
@@ -435,7 +510,7 @@ fig4_focused_scatter <- function(df, figdir, lfc_threshold = 0.5, max_labels = 3
   df_rna_prom <- df_sig %>% filter(!is.na(rna_log2FC), !is.na(prom_best_log2FC))
   lab_rna_prom <- select_focus_labels(
     df_rna_prom,
-    padj_a = "rna_padj", padj_b = "prom_best_padj",
+    padj_a = "rna_padj", padj_b = "prom_combined_padj",
     sig_a = "rna_sig", sig_b = "prom_sig",
     lfc_a = "rna_log2FC", lfc_b = "prom_best_log2FC",
     lfc_threshold = lfc_threshold, max_labels = max_labels
@@ -470,7 +545,7 @@ fig4_focused_scatter <- function(df, figdir, lfc_threshold = 0.5, max_labels = 3
   df_rna_enh <- df_sig %>% filter(!is.na(rna_log2FC), !is.na(enh_best_log2FC))
   lab_rna_enh <- select_focus_labels(
     df_rna_enh,
-    padj_a = "rna_padj", padj_b = "enh_best_padj",
+    padj_a = "rna_padj", padj_b = "enh_combined_padj",
     sig_a = "rna_sig", sig_b = "enh_sig",
     lfc_a = "rna_log2FC", lfc_b = "enh_best_log2FC",
     lfc_threshold = lfc_threshold, max_labels = max_labels
@@ -703,6 +778,88 @@ fig7_barbell <- function(df, figdir, topN = 40) {
 }
 
 # ============================================================================
+# Figure 8: Sensitivity Analysis Comparison
+# ============================================================================
+
+fig8_sensitivity <- function(datadir, figdir) {
+  msg("Figure 8: Sensitivity analysis comparison")
+
+  summary_file <- file.path(datadir, "sensitivity", "summary.tsv")
+  if (!file.exists(summary_file)) {
+    msg("  No sensitivity summary found; skipping Fig8")
+    return(NULL)
+  }
+
+  sens <- read_tsv(summary_file, show_col_types = FALSE)
+  if (nrow(sens) == 0) {
+    msg("  Empty sensitivity summary; skipping Fig8")
+    return(NULL)
+  }
+
+  sens_long <- sens %>%
+    pivot_longer(cols = starts_with("n_"), names_to = "metric", values_to = "count") %>%
+    mutate(
+      metric = gsub("n_", "", metric),
+      metric = gsub("_", " ", metric),
+      window = factor(window, levels = sort(unique(window)))
+    )
+
+  p1 <- ggplot(sens_long, aes(x = window, y = count, fill = metric)) +
+    geom_col(position = "dodge") +
+    labs(
+      title = "Gene/Peak Counts by Enhancer Window Size",
+      x = "Enhancer window (bp)", y = "Count", fill = "Metric"
+    ) +
+    theme_classic(base_size = 11) +
+    theme(legend.position = "bottom", axis.text.x = element_text(angle = 45, hjust = 1))
+
+  # Jaccard overlap heatmap across window sizes
+  sens_dirs <- list.dirs(file.path(datadir, "sensitivity"), recursive = FALSE)
+  if (length(sens_dirs) >= 2) {
+    window_genes <- list()
+    for (d in sens_dirs) {
+      w <- basename(d)
+      enh_file <- file.path(d, "enhancer_multigene.tsv")
+      if (file.exists(enh_file)) {
+        genes <- unique(read_tsv(enh_file, col_names = FALSE, show_col_types = FALSE)[[3]])
+        window_genes[[w]] <- genes
+      }
+    }
+
+    if (length(window_genes) >= 2) {
+      windows <- names(window_genes)
+      jaccard_mat <- matrix(0, nrow = length(windows), ncol = length(windows),
+                            dimnames = list(windows, windows))
+      for (i in seq_along(windows)) {
+        for (j in seq_along(windows)) {
+          a <- window_genes[[windows[i]]]
+          b <- window_genes[[windows[j]]]
+          jaccard_mat[i, j] <- length(intersect(a, b)) / length(union(a, b))
+        }
+      }
+
+      png(file.path(figdir, "Fig8b_sensitivity_jaccard.png"),
+          width = 7, height = 6, units = "in", res = 300)
+      pheatmap::pheatmap(
+        jaccard_mat,
+        main = "Jaccard Overlap: Enhancer Genes by Window Size",
+        display_numbers = TRUE,
+        number_format = "%.2f",
+        color = colorRampPalette(c("white", "#0072B2"))(50)
+      )
+      dev.off()
+      msg("  Saved Fig8b_sensitivity_jaccard.png")
+    }
+  }
+
+  ggsave(file.path(figdir, "Fig8_sensitivity_comparison.png"), p1,
+         width = 8, height = 5, dpi = 300)
+  msg("  Saved Fig8_sensitivity_comparison.png")
+
+  p1
+}
+
+# ============================================================================
 # Main
 # ============================================================================
 
@@ -752,6 +909,7 @@ fig4_focused_scatter(df, figdir)
 fig5_stratified_boxplots(df, figdir)
 fig6_heatmap(df, figdir, topN = opt$topN)
 fig7_barbell(df, figdir, topN = opt$topN)
+fig8_sensitivity(opt$datadir, figdir)
 
 msg("=== DONE ===")
 msg("All figures saved to: %s", figdir)

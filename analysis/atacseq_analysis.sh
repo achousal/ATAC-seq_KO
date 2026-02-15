@@ -437,6 +437,68 @@ else
 fi
 
 # =============================================================================
+# STEP 3.1: IDR Analysis (ENCODE-faithful)
+# =============================================================================
+log "STEP 3.1: IDR Analysis"
+PEAKS_BED="$union_bed"
+PEAKS_SAF="$union_saf"
+
+if [[ "${ATAC_IDR_ENABLED:-0}" -eq 1 ]]; then
+    IDR_CONSENSUS="${macs_dir}/idr/idr_consensus_peaks.bed"
+    IDR_SAF="${macs_dir}/idr/idr_consensus_peaks.saf"
+
+    if [[ ! -s "$IDR_CONSENSUS" ]]; then
+        if [[ -f "${SCRIPT_DIR}/idr_analysis.sh" ]]; then
+            bash "${SCRIPT_DIR}/idr_analysis.sh" \
+                --macs-dir "$macs_dir" \
+                --samtools-dir "$samtools_dir" \
+                --threads "$THREADS" \
+                --outdir "${macs_dir}/idr" \
+                2>&1 | tee "${log_dir}/idr.log"
+        else
+            log "[WARN] idr_analysis.sh not found; using union peaks"
+        fi
+    else
+        skip "IDR consensus exists: $IDR_CONSENSUS"
+    fi
+
+    # Check if IDR produced output (may fall back to union)
+    if [[ -s "$IDR_CONSENSUS" && -s "$IDR_SAF" ]]; then
+        PEAKS_BED="$IDR_CONSENSUS"
+        PEAKS_SAF="$IDR_SAF"
+        log "Using IDR consensus peaks for downstream: $PEAKS_BED"
+    else
+        log "[INFO] IDR did not produce consensus; using union peaks"
+    fi
+else
+    log "[INFO] IDR disabled (ATAC_IDR_ENABLED=0); using union peaks"
+fi
+
+# =============================================================================
+# STEP 3.2: Extended QC Metrics
+# =============================================================================
+log "STEP 3.2: Extended QC Metrics"
+QC_EXT="${subread_dir}/qc_metrics_extended.tsv"
+if [[ ! -s "$QC_EXT" ]]; then
+    if [[ -f "${SCRIPT_DIR}/compute_qc_metrics.sh" ]]; then
+        bash "${SCRIPT_DIR}/compute_qc_metrics.sh" \
+            --samtools-dir "$samtools_dir" \
+            --peaks-bed "$PEAKS_BED" \
+            --blacklist "$bl_regions" \
+            --bigwig-dir "$deeptools_dir" \
+            --gtf "${ATAC_REFERENCE_DIR}/gencode.vM25.annotation.gtf" \
+            --threads "$THREADS" \
+            --outdir "$subread_dir" \
+            --policy "${ATAC_QC_FAIL_POLICY:-warn}" \
+            2>&1 | tee "${log_dir}/qc_extended.log"
+    else
+        log "[WARN] compute_qc_metrics.sh not found; skipping extended QC"
+    fi
+else
+    skip "Extended QC exists: $QC_EXT"
+fi
+
+# =============================================================================
 # STEP 3.5: HOMER: PEAK ANNOTATION + MOTIF ENRICHMENT
 # =============================================================================
 log "STEP 3.5: HOMER annotation + motifs (size=${ATAC_HOMER_SIZE:-200})"
@@ -514,7 +576,7 @@ log "STEP 4: featureCounts (union peaks)"
 fc_out="${subread_dir}/union_peaks_featureCounts.txt"
 if [[ ! -s "$fc_out" ]]; then
     featureCounts -p -B -C -T "$THREADS" \
-        -a "$union_saf" -F SAF \
+        -a "$PEAKS_SAF" -F SAF \
         -o "$fc_out" \
         "${samtools_dir}/"*.final.bam
 else
@@ -535,11 +597,15 @@ if [[ ! -s "${deseq_dir}/DA_results_DESeq2.csv" ]]; then
     have Rscript || { log "[ERROR] Rscript not found in PATH"; exit 1; }
     [[ -s "$deseq_R" ]] || { log "[ERROR] Missing DESeq2 script: $deseq_R"; exit 1; }
 
-    # Pass sample metadata file as third argument if it exists
+    # Pass sample metadata file and optional covariate
     if [[ -s "$sample_meta" ]]; then
-        Rscript "$deseq_R" "$fc_out" "$deseq_dir" "$sample_meta" 2> "${log_dir}/deseq2.stderr.log"
+        DESEQ_ARGS="--counts $fc_out --outdir $deseq_dir --metadata $sample_meta"
+        if [[ -n "${ATAC_COVARIATE:-}" ]]; then
+            DESEQ_ARGS="$DESEQ_ARGS --covariate $ATAC_COVARIATE"
+        fi
+        Rscript "$deseq_R" $DESEQ_ARGS 2> "${log_dir}/deseq2.stderr.log"
     else
-        Rscript "$deseq_R" "$fc_out" "$deseq_dir" 2> "${log_dir}/deseq2.stderr.log"
+        Rscript "$deseq_R" --counts "$fc_out" --outdir "$deseq_dir" 2> "${log_dir}/deseq2.stderr.log"
     fi
 
     if have ml; then
@@ -555,10 +621,15 @@ log "[DONE] Key outputs:"
 log "  Versions:       ${versions_txt}"
 log "  MultiQC:        ${multiqc_dir}/multiqc_report.html"
 log "  QC table:       ${qc_tsv}"
+log "  Extended QC:    ${subread_dir}/qc_metrics_extended.tsv"
 log "  Final BAMs:     ${samtools_dir}/*.final.bam"
 log "  BigWigs (CPM):  ${deeptools_dir}/*.CPM.bw"
 log "  Per-rep peaks:  ${macs_dir}/rep_peaks/*_peaks.narrowPeak"
 log "  Union peaks:    ${macs_dir}/union_peaks.bed"
+if [[ "${ATAC_IDR_ENABLED:-0}" -eq 1 ]]; then
+    log "  IDR summary:    ${macs_dir}/idr/idr_summary.tsv"
+    log "  IDR peaks:      ${macs_dir}/idr/idr_consensus_peaks.bed"
+fi
 log "  HOMER anno:     ${homer_dir}/union_peaks.annotatePeaks.size${homer_size}.txt"
 log "  HOMER motifs:   ${homer_dir}/motifs_union.size${homer_size}/homerResults.html"
 log "  Tag dirs:       ${homer_dir}/tagdirs/*"
