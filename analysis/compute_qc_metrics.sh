@@ -388,24 +388,26 @@ for final_bam in "${SAMTOOLS_DIR}"/*.final.bam; do
     awk 'BEGIN{OFS="\t"}{
         chr=$1; tss_start=$2; tss_end=$3; id=$4; name=$5; strand=$6;
 
-        # TSS is at tss_start (0-based)
+        # TSS is at tss_start (0-based); upstream/downstream are strand-aware
         if (strand == "+") {
             up_start = tss_start - 1000;
             up_end = tss_start - 100;
             down_start = tss_start + 100;
             down_end = tss_start + 1000;
         } else {
-            up_start = tss_start - 1000;
-            up_end = tss_start - 100;
-            down_start = tss_start + 100;
-            down_end = tss_start + 1000;
+            up_start = tss_start + 100;
+            up_end = tss_start + 1000;
+            down_start = tss_start - 1000;
+            down_end = tss_start - 100;
         }
 
         if (up_start < 0) up_start = 0;
+        if (up_end < 0) up_end = 0;
         if (down_start < 0) down_start = 0;
+        if (down_end < 0) down_end = 0;
 
-        print chr, up_start, up_end, id, name, strand;
-        print chr, down_start, down_end, id, name, strand;
+        if (up_end > up_start) print chr, up_start, up_end, id, name, strand;
+        if (down_end > down_start) print chr, down_start, down_end, id, name, strand;
     }' "$TSS_BED" | LC_ALL=C sort -k1,1 -k2,2n \
         | bedtools intersect -u -abam "$final_bam" -b - \
         | samtools view -c - > "$tss_tmp.flanks" || echo "0" > "$tss_tmp.flanks"

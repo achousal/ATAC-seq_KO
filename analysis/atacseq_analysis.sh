@@ -599,11 +599,11 @@ if [[ ! -s "${deseq_dir}/DA_results_DESeq2.csv" ]]; then
 
     # Pass sample metadata file and optional covariate
     if [[ -s "$sample_meta" ]]; then
-        DESEQ_ARGS="--counts $fc_out --outdir $deseq_dir --metadata $sample_meta"
+        DESEQ_ARGS=(--counts "$fc_out" --outdir "$deseq_dir" --metadata "$sample_meta")
         if [[ -n "${ATAC_COVARIATE:-}" ]]; then
-            DESEQ_ARGS="$DESEQ_ARGS --covariate $ATAC_COVARIATE"
+            DESEQ_ARGS+=(--covariate "$ATAC_COVARIATE")
         fi
-        Rscript "$deseq_R" $DESEQ_ARGS 2> "${log_dir}/deseq2.stderr.log"
+        Rscript "$deseq_R" "${DESEQ_ARGS[@]}" 2> "${log_dir}/deseq2.stderr.log"
     else
         Rscript "$deseq_R" --counts "$fc_out" --outdir "$deseq_dir" 2> "${log_dir}/deseq2.stderr.log"
     fi

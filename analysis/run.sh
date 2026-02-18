@@ -169,9 +169,16 @@ fi
 # Validate ATAC outputs
 DA_RESULTS="${DESEQ_DIR}/DA_results_DESeq2.csv"
 UNION_PEAKS="${MACS_DIR}/union_peaks.bed"
-[[ -s "$DA_RESULTS" ]] || die "DA results not found: $DA_RESULTS"
-[[ -s "$UNION_PEAKS" ]] || die "Union peaks not found: $UNION_PEAKS"
-log "ATAC-seq outputs validated"
+if [[ $SKIP_ATAC -eq 0 ]]; then
+    [[ -s "$DA_RESULTS" ]] || die "DA results not found: $DA_RESULTS"
+    [[ -s "$UNION_PEAKS" ]] || die "Union peaks not found: $UNION_PEAKS"
+    log "ATAC-seq outputs validated"
+else
+    if [[ ! -s "$DA_RESULTS" ]]; then
+        warn "DA results not found (--skip-atac active): $DA_RESULTS"
+        warn "Downstream stages requiring DA results will be skipped"
+    fi
+fi
 
 # =============================================================================
 # STAGE 1.5: Multi-method DA Concordance
@@ -195,11 +202,11 @@ else
             have module && module load R/4.2.0 2>/dev/null || true
 
             log "Running multi-method DA concordance"
-            CONC_ARGS="--counts $FC_OUT --metadata $SAMPLE_META --deseq2 $DA_RESULTS --outdir $CONCORDANCE_DIR"
+            CONC_ARGS=(--counts "$FC_OUT" --metadata "$SAMPLE_META" --deseq2 "$DA_RESULTS" --outdir "$CONCORDANCE_DIR")
             if [[ -n "$COVARIATE" ]]; then
-                CONC_ARGS="$CONC_ARGS --covariate $COVARIATE"
+                CONC_ARGS+=(--covariate "$COVARIATE")
             fi
-            Rscript "${SCRIPT_DIR}/da_concordance.R" $CONC_ARGS \
+            Rscript "${SCRIPT_DIR}/da_concordance.R" "${CONC_ARGS[@]}" \
                 2>&1 | tee "${LOG_DIR}/concordance.$(date +%Y%m%d_%H%M%S).log"
         else
             warn "da_concordance.R not found or Rscript unavailable; skipping concordance"
