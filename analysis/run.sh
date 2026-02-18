@@ -255,10 +255,18 @@ else
             # Run exploratory figure panel
             if [[ -f "${SCRIPT_DIR}/rna_atac_exploratory.R" ]]; then
                 log "Running exploratory RNA+ATAC figures"
+                EXPLORATORY_ARGS=(
+                    --rna_deg_file "$RNA_DEG_FILE"
+                    --datadir "$INTEGRATION_DIR"
+                    --figdir "${FIGURES_DIR}/integration"
+                )
+                COUNTS_FILE="${ATAC_BASE}/analysis/subread/union_peaks_featureCounts.txt"
+                SAMPLES_FILE="${ATAC_SAMPLE_META:-${SCRIPT_DIR}/samples.tsv}"
+                [[ -f "$COUNTS_FILE" ]] && EXPLORATORY_ARGS+=(--counts "$COUNTS_FILE")
+                [[ -f "$SAMPLES_FILE" ]] && EXPLORATORY_ARGS+=(--metadata "$SAMPLES_FILE")
+
                 Rscript "${SCRIPT_DIR}/rna_atac_exploratory.R" \
-                    --rna_deg_file "$RNA_DEG_FILE" \
-                    --datadir "$INTEGRATION_DIR" \
-                    --figdir "${FIGURES_DIR}/integration" \
+                    "${EXPLORATORY_ARGS[@]}" \
                     2>&1 | tee "${LOG_DIR}/rna_atac_exploratory.$(date +%Y%m%d_%H%M%S).log"
             fi
 
@@ -529,21 +537,39 @@ EOF
     if have computeMatrix && have plotHeatmap; then
         HEATMAP="${FIGURES_DIR}/heatmaps/heatmap_all_peaks.pdf"
         BW_FILES=("${DEEPTOOLS_DIR}"/*.CPM.bw)
-        
+
         if [[ ${#BW_FILES[@]} -gt 0 && -f "${BW_FILES[0]}" ]]; then
             if [[ $FORCE -eq 1 ]] || ! checkpoint "$HEATMAP" "Heatmap"; then
                 log "Generating deepTools heatmap"
                 MATRIX="${DEEPTOOLS_DIR}/matrix_all.gz"
-                LABELS=$(printf "%s " "${BW_FILES[@]}" | sed 's|.*/||g; s|\.CPM\.bw||g')
-                
-                computeMatrix reference-point -R "$UNION_PEAKS" -S "${BW_FILES[@]}" \
+                DT_LOG="${LOG_DIR}/deeptools_heatmap.log"
+
+                # Build labels as array (IFS is newline/tab, so unquoted $LABELS would break)
+                labels=()
+                for bw in "${BW_FILES[@]}"; do
+                    labels+=("$(basename "$bw" .CPM.bw)")
+                done
+
+                if computeMatrix reference-point -R "$UNION_PEAKS" -S "${BW_FILES[@]}" \
                     -o "$MATRIX" -b 3000 -a 3000 --referencePoint center \
-                    -p "${ATAC_THREADS:-8}" --skipZeros --samplesLabel $LABELS 2>/dev/null || true
-                
-                [[ -s "$MATRIX" ]] && plotHeatmap -m "$MATRIX" -out "$HEATMAP" \
-                    --dpi 300 --colorMap Reds --heatmapHeight 12 2>/dev/null || true
+                    -p "${ATAC_THREADS:-8}" --skipZeros \
+                    --samplesLabel "${labels[@]}" 2>>"$DT_LOG"; then
+                    if [[ -s "$MATRIX" ]]; then
+                        plotHeatmap -m "$MATRIX" -out "$HEATMAP" \
+                            --dpi 300 --colorMap Reds --heatmapHeight 12 2>>"$DT_LOG" \
+                            || log "WARNING: plotHeatmap failed; see $DT_LOG"
+                    else
+                        log "WARNING: computeMatrix produced empty matrix; skipping heatmap"
+                    fi
+                else
+                    log "WARNING: computeMatrix failed; see $DT_LOG"
+                fi
             fi
+        else
+            log "WARNING: No BigWig files (*.CPM.bw) found in ${DEEPTOOLS_DIR}; skipping heatmap"
         fi
+    else
+        log "WARNING: computeMatrix/plotHeatmap not in PATH; skipping heatmap"
     fi
     
     # -------------------------------------------------------------------------

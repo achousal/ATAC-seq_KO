@@ -132,12 +132,6 @@ collapse_peak_to_gene <- function(da_df, map_df, alpha = 0.05) {
   left_join(gene_stats, best_rows, by = "gene_id_clean")
 }
 
-qrange <- function(v) {
-  v <- v[is.finite(v)]
-  if (length(v) < 10) return(NULL)
-  as.numeric(quantile(v, probs = c(0.01, 0.99), na.rm = TRUE))
-}
-
 modality_rank <- function(padj, log2fc) {
   p <- as.numeric(padj)
   fc <- as.numeric(log2fc)
@@ -586,35 +580,6 @@ if (have_patchwork) {
   ggsave(file.path(figdir, "Panel3_Prom_vs_Enh_full.png"), p3, width = 5, height = 5, dpi = 300)
 }
 
-x1 <- qrange(df_rna_prom$rna_log2FC); y1 <- qrange(df_rna_prom$prom_best_log2FC)
-x2 <- qrange(df_rna_enh$rna_log2FC);  y2 <- qrange(df_rna_enh$enh_best_log2FC)
-x3 <- qrange(df_prom_enh$prom_best_log2FC); y3 <- qrange(df_prom_enh$enh_best_log2FC)
-
-p1z <- make_panel(df_rna_prom, "rna_log2FC","prom_best_log2FC",
-                  "RNA log2FC (ATF5KO vs WT)", "Promoter best-peak log2FC",
-                  "RNA vs Promoter (DE-scale)", label_genes_rna_prom, xlim = x1, ylim = y1)
-
-p2z <- make_panel(df_rna_enh, "rna_log2FC","enh_best_log2FC",
-                  "RNA log2FC (ATF5KO vs WT)", "Enhancer best-peak log2FC",
-                  "RNA vs Enhancer (DE-scale)", label_genes_rna_enh, xlim = x2, ylim = y2)
-
-p3z <- make_panel(df_prom_enh, "prom_best_log2FC","enh_best_log2FC",
-                  "Promoter best-peak log2FC", "Enhancer best-peak log2FC",
-                  "Promoter vs Enhancer (DE-scale)", label_genes_prom_enh, xlim = x3, ylim = y3)
-
-if (have_patchwork) {
-  p_full <- (p1z + p2z + p3z) +
-    patchwork::plot_layout(ncol = 3, guides = "collect") &
-    ggplot2::theme(legend.position = "bottom")
-
-  ggsave(file.path(figdir, "Figure2_threepanel_DEscale_RNA_Prom_Enh.png"),
-         plot = p_full, width = 15, height = 5, dpi = 300)
-} else {
-  ggsave(file.path(figdir, "Panel1_RNA_vs_Prom_DEscale.png"), p1z, width = 5, height = 5, dpi = 300)
-  ggsave(file.path(figdir, "Panel2_RNA_vs_Enh_DEscale.png"),  p2z, width = 5, height = 5, dpi = 300)
-  ggsave(file.path(figdir, "Panel3_Prom_vs_Enh_DEscale.png"), p3z, width = 5, height = 5, dpi = 300)
-}
-
 msg("DONE. Outputs in: %s", opt$datadir)
 msg("Figures in: %s", figdir)
 msg("Key outputs:")
@@ -625,4 +590,3 @@ msg("  top_integrated_genes.csv")
 msg("  top%d_integrated_genes.csv", opt$topN)
 msg("  summary_stats.csv")
 msg("  Figure1_threepanel_fullrange_RNA_Prom_Enh.png")
-msg("  Figure2_threepanel_DEscale_RNA_Prom_Enh.png")

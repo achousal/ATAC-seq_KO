@@ -530,7 +530,8 @@ fig4_focused_scatter <- function(df, figdir, lfc_threshold = 0.5, max_labels = 3
       data = lab_rna_prom,
       aes(label = gene_label),
       size = 3.0, fontface = "italic", max.overlaps = Inf,
-      box.padding = 0.3, point.padding = 0.2, segment.color = "grey50"
+      box.padding = 0.3, point.padding = 0.2, segment.color = "grey50",
+      show.legend = FALSE
     ) +
     scale_color_manual(values = pal) +
     scale_fill_manual(values = pal, guide = "none") +
@@ -565,7 +566,8 @@ fig4_focused_scatter <- function(df, figdir, lfc_threshold = 0.5, max_labels = 3
       data = lab_rna_enh,
       aes(label = gene_label),
       size = 3.0, fontface = "italic", max.overlaps = Inf,
-      box.padding = 0.3, point.padding = 0.2, segment.color = "grey50"
+      box.padding = 0.3, point.padding = 0.2, segment.color = "grey50",
+      show.legend = FALSE
     ) +
     scale_color_manual(values = pal) +
     scale_fill_manual(values = pal, guide = "none") +
@@ -647,71 +649,151 @@ fig5_stratified_boxplots <- function(df, figdir) {
 # Figure 6: Top DEG Heatmap
 # ============================================================================
 
-fig6_heatmap <- function(df, figdir, topN = 50) {
-  msg("Figure 6: Top DEG heatmap")
+fig6_heatmap <- function(df, figdir, counts_file = NULL, metadata_file = NULL,
+                         datadir = NULL, topN = 50) {
+  msg("Figure 6: Sample-level ATAC accessibility heatmap")
 
-  # Top N by abs(RNA log2FC)
-  top_genes <- df %>%
-    filter(!is.na(rna_log2FC)) %>%
-    arrange(desc(abs(rna_log2FC))) %>%
-    slice_head(n = topN) %>%
-    filter(!is.na(prom_best_log2FC) | !is.na(enh_best_log2FC))
-
-  if (nrow(top_genes) < 5) {
-    msg("  Not enough genes with both RNA and ATAC data for heatmap")
+  if (is.null(counts_file) || !file.exists(counts_file)) {
+    msg("  No counts file provided or not found; skipping Fig6")
+    return(NULL)
+  }
+  if (is.null(metadata_file) || !file.exists(metadata_file)) {
+    msg("  No metadata file provided or not found; skipping Fig6")
     return(NULL)
   }
 
-  # Build matrix
-  mat <- top_genes %>%
-    select(gene_label, rna_log2FC, prom_best_log2FC, enh_best_log2FC) %>%
-    column_to_rownames("gene_label") %>%
-    as.matrix()
+  # Load sample metadata
+  meta <- readr::read_tsv(metadata_file, show_col_types = FALSE)
+  meta <- meta %>%
+    mutate(sample_clean = gsub("[^A-Za-z0-9]", "", sample))
 
-  colnames(mat) <- c("RNA", "Promoter", "Enhancer")
+  # Load count matrix (featureCounts format: 6 annotation cols + sample cols)
+  counts_raw <- readr::read_tsv(counts_file, comment = "#", show_col_types = FALSE)
+  peak_ids <- counts_raw[[1]]
+  count_cols <- counts_raw[, -(1:6)]
+  colnames(count_cols) <- gsub(".*/", "", colnames(count_cols))
+  colnames(count_cols) <- gsub("\\.final\\.bam$", "", colnames(count_cols))
 
-  # Annotation for significance
-  annot_row <- top_genes %>%
-    transmute(
-      gene_label,
-      RNA_sig = ifelse(rna_sig, "sig", "ns"),
-      Prom_sig = ifelse(prom_sig, "sig", "ns"),
-      Enh_sig = ifelse(enh_sig, "sig", "ns")
+  # Match samples
+  common <- intersect(meta$sample_clean, colnames(count_cols))
+  if (length(common) < 2) {
+    msg("  Fewer than 2 matching samples; skipping Fig6")
+    return(NULL)
+  }
+  meta <- meta %>% filter(sample_clean %in% common) %>% arrange(condition, sample_clean)
+  count_mat <- as.matrix(count_cols[, meta$sample_clean])
+  rownames(count_mat) <- peak_ids
+
+  # Select top DA peaks with gene labels
+  top_genes <- df %>%
+    filter(any_sig, !is.na(gene_label), nzchar(gene_label)) %>%
+    mutate(
+      n_sig = as.integer(rna_sig) + as.integer(prom_sig) + as.integer(enh_sig),
+      best_padj = pmin(
+        ifelse(is.na(rna_padj), 1, rna_padj),
+        ifelse(is.na(prom_combined_padj), 1, prom_combined_padj),
+        ifelse(is.na(enh_combined_padj), 1, enh_combined_padj)
+      )
     ) %>%
-    column_to_rownames("gene_label")
+    arrange(desc(n_sig), best_padj) %>%
+    distinct(gene_label, .keep_all = TRUE) %>%
+    slice_head(n = topN)
 
-  annot_colors <- list(
-    RNA_sig = c("sig" = "#0072B2", "ns" = "grey90"),
-    Prom_sig = c("sig" = "#D55E00", "ns" = "grey90"),
-    Enh_sig = c("sig" = "#009E73", "ns" = "grey90")
+  if (nrow(top_genes) < 5) {
+    msg("  Not enough significant genes for heatmap")
+    return(NULL)
+  }
+
+  # Map genes to their best promoter peak (closest, most significant)
+  prom_map_file <- NULL
+  candidates <- c(
+    if (!is.null(datadir)) file.path(datadir, "promoter_multigene.tsv"),
+    file.path(dirname(counts_file), "..", "gene_integration", "promoter_multigene.tsv")
   )
+  for (cand in candidates) {
+    if (file.exists(cand)) { prom_map_file <- cand; break }
+  }
 
-  # Color scale centered at 0
-  max_abs <- max(abs(mat), na.rm = TRUE)
-  breaks <- seq(-max_abs, max_abs, length.out = 101)
+  if (!is.null(prom_map_file) && file.exists(prom_map_file)) {
+    prom_map <- readr::read_tsv(
+      prom_map_file,
+      col_names = c("peak_id", "gene_id", "gene_name", "strand", "dist_bp", "abs_dist", "weight"),
+      show_col_types = FALSE
+    )
+    # Best peak per gene (closest to TSS)
+    peak_gene <- prom_map %>%
+      filter(gene_name %in% top_genes$gene_label) %>%
+      arrange(abs_dist) %>%
+      distinct(gene_name, .keep_all = TRUE)
+  } else {
+    # Fall back: try to match peak IDs from df if available
+    msg("  Promoter map not found; attempting peak_id match from DA results")
+    peak_gene <- top_genes %>%
+      filter(!is.na(prom_best_peak_id)) %>%
+      transmute(peak_id = prom_best_peak_id, gene_name = gene_label)
+  }
+
+  # Subset count matrix to selected peaks
+  valid_peaks <- intersect(peak_gene$peak_id, rownames(count_mat))
+  if (length(valid_peaks) < 5) {
+    msg("  Too few peaks matched (%d); skipping Fig6", length(valid_peaks))
+    return(NULL)
+  }
+
+  peak_gene_sub <- peak_gene %>% filter(peak_id %in% valid_peaks)
+  mat_sub <- count_mat[peak_gene_sub$peak_id, , drop = FALSE]
+
+  # Normalize: log2(CPM + 1)
+  lib_sizes <- colSums(count_mat)
+  mat_cpm <- t(t(mat_sub) / lib_sizes * 1e6)
+  mat_log <- log2(mat_cpm + 1)
+
+  # Z-score per peak (row)
+  mat_z <- t(scale(t(mat_log)))
+  rownames(mat_z) <- peak_gene_sub$gene_name
+
+  # Remove rows with zero variance (all-NA z-scores)
+  keep_rows <- apply(mat_z, 1, function(x) !all(is.na(x)))
+  mat_z <- mat_z[keep_rows, , drop = FALSE]
+
+  if (nrow(mat_z) < 5) {
+    msg("  Too few valid rows after z-scoring; skipping Fig6")
+    return(NULL)
+  }
+
+  # Column annotation: condition
+  col_annot <- data.frame(
+    Condition = meta$condition,
+    row.names = meta$sample_clean
+  )
+  annot_colors <- list(Condition = c("WT" = "#0072B2", "KO" = "#D55E00"))
+
+  # Color scale: blue-white-red centered at 0
+  max_z <- min(max(abs(mat_z), na.rm = TRUE), 3)
+  breaks <- seq(-max_z, max_z, length.out = 101)
   colors <- colorRampPalette(c("#3182bd", "white", "#e6550d"))(100)
 
-  png(file.path(figdir, "Fig6_top_DEG_heatmap.png"), width = 8, height = 12, units = "in", res = 300)
+  png(file.path(figdir, "Fig6_sample_heatmap.png"),
+      width = 8, height = max(8, nrow(mat_z) * 0.2 + 2),
+      units = "in", res = 300)
   pheatmap::pheatmap(
-    mat,
-    cluster_rows = FALSE,  # Keep ordered by RNA effect size
+    mat_z,
+    cluster_rows = TRUE,
     cluster_cols = FALSE,
     breaks = breaks,
     color = colors,
     na_col = "grey95",
-    annotation_row = annot_row,
+    annotation_col = col_annot,
     annotation_colors = annot_colors,
-    main = sprintf("Top %d DEGs: RNA vs ATAC log2FC", nrow(mat)),
+    main = sprintf("ATAC Accessibility: Top %d DA Genes (z-scored log2CPM)", nrow(mat_z)),
     fontsize = 9,
     fontsize_row = 7,
-    cellwidth = 30,
-    cellheight = 10
+    show_colnames = TRUE
   )
   dev.off()
 
-  msg("  Saved Fig6_top_DEG_heatmap.png")
-
-  invisible(mat)
+  msg("  Saved Fig6_sample_heatmap.png (%d genes x %d samples)", nrow(mat_z), ncol(mat_z))
+  invisible(mat_z)
 }
 
 # ============================================================================
@@ -870,6 +952,10 @@ option_list <- list(
               help = "Directory containing promoter/enhancer outputs from prep script"),
   make_option("--figdir", type = "character", default = NULL,
               help = "Directory to save figures (default: <datadir>/figures_exploratory)"),
+  make_option("--counts", type = "character", default = NULL,
+              help = "featureCounts output file for sample-level heatmap (optional)"),
+  make_option("--metadata", type = "character", default = NULL,
+              help = "Sample metadata TSV (sample, condition, replicate) for heatmap (optional)"),
   make_option("--alpha", type = "double", default = 0.05,
               help = "Significance threshold [default: 0.05]"),
   make_option("--topN", type = "integer", default = 50,
@@ -907,7 +993,8 @@ fig2_quadrant(df, figdir)
 fig3_overlap(df, figdir)
 fig4_focused_scatter(df, figdir)
 fig5_stratified_boxplots(df, figdir)
-fig6_heatmap(df, figdir, topN = opt$topN)
+fig6_heatmap(df, figdir, counts_file = opt$counts, metadata_file = opt$metadata,
+             datadir = opt$datadir, topN = opt$topN)
 fig7_barbell(df, figdir, topN = opt$topN)
 fig8_sensitivity(opt$datadir, figdir)
 
