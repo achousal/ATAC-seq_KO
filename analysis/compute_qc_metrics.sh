@@ -377,39 +377,31 @@ for final_bam in "${SAMTOOLS_DIR}"/*.final.bam; do
 
     tss_tmp="${OUTDIR}/${samplename}.tss.tmp"
 
-    # TSS regions: +/- 100bp around TSS
+    # TSS regions: +/- 100bp around TSS (merged to avoid double-counting overlaps)
+    center_bed="${tss_tmp}.center.bed"
+    flank_bed="${tss_tmp}.flank.bed"
+
     bedtools slop -i "$TSS_BED" -g "${ATAC_CHROM_SIZES}" -b 100 2>/dev/null \
-        | bedtools intersect -u -abam "$final_bam" -b - \
+        | LC_ALL=C sort -k1,1 -k2,2n \
+        | bedtools merge -i - > "$center_bed"
+
+    bedtools intersect -u -abam "$final_bam" -b "$center_bed" \
         | samtools view -c - > "$tss_tmp.center" || echo "0" > "$tss_tmp.center"
 
     # Flanking regions: 1000bp upstream and downstream (exclude center +/- 100bp)
-    # Upstream: TSS - 1000 to TSS - 100
-    # Downstream: TSS + 100 to TSS + 1000
+    # Symmetric around TSS (strand does not matter for enrichment windows)
     awk 'BEGIN{OFS="\t"}{
-        chr=$1; tss_start=$2; tss_end=$3; id=$4; name=$5; strand=$6;
-
-        # TSS is at tss_start (0-based); upstream/downstream are strand-aware
-        if (strand == "+") {
-            up_start = tss_start - 1000;
-            up_end = tss_start - 100;
-            down_start = tss_start + 100;
-            down_end = tss_start + 1000;
-        } else {
-            up_start = tss_start + 100;
-            up_end = tss_start + 1000;
-            down_start = tss_start - 1000;
-            down_end = tss_start - 100;
-        }
-
-        if (up_start < 0) up_start = 0;
-        if (up_end < 0) up_end = 0;
-        if (down_start < 0) down_start = 0;
-        if (down_end < 0) down_end = 0;
-
-        if (up_end > up_start) print chr, up_start, up_end, id, name, strand;
-        if (down_end > down_start) print chr, down_start, down_end, id, name, strand;
+        tss=$2;
+        s1 = tss - 1000; e1 = tss - 100;
+        s2 = tss + 101;  e2 = tss + 1001;
+        if (s1 < 0) s1 = 0;
+        if (e1 > s1) print $1, s1, e1;
+        if (e2 > s2) print $1, s2, e2;
     }' "$TSS_BED" | LC_ALL=C sort -k1,1 -k2,2n \
-        | bedtools intersect -u -abam "$final_bam" -b - \
+        | bedtools merge -i - \
+        | bedtools subtract -a - -b "$center_bed" > "$flank_bed"
+
+    bedtools intersect -u -abam "$final_bam" -b "$flank_bed" \
         | samtools view -c - > "$tss_tmp.flanks" || echo "0" > "$tss_tmp.flanks"
 
     center_reads=$(cat "$tss_tmp.center")
@@ -417,10 +409,9 @@ for final_bam in "${SAMTOOLS_DIR}"/*.final.bam; do
 
     if [[ $flank_reads -gt 0 ]]; then
         # TSS enrichment = (center reads / center bp) / (flank reads / flank bp)
-        # Center: 200bp per TSS, Flanks: 1800bp per TSS
-        n_tss=$(wc -l < "$TSS_BED")
-        center_bp=$((n_tss * 200))
-        flank_bp=$((n_tss * 1800))
+        # Use actual merged bp to account for overlapping TSS regions
+        center_bp=$(awk '{s += $3 - $2} END{print s+0}' "$center_bed")
+        flank_bp=$(awk '{s += $3 - $2} END{print s+0}' "$flank_bed")
 
         tss_enrichment=$(awk -v c="$center_reads" -v cb="$center_bp" \
                              -v f="$flank_reads" -v fb="$flank_bp" \
@@ -437,6 +428,8 @@ for final_bam in "${SAMTOOLS_DIR}"/*.final.bam; do
     else
         tss_enrichment="0.0000"
     fi
+
+    rm -f "$center_bed" "$flank_bed"
 
     rm -f "$tss_tmp.center" "$tss_tmp.flanks"
 

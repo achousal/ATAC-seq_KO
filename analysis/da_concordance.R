@@ -251,6 +251,7 @@ results_deseq2 <- read_csv(opt$deseq2, col_types = cols(), show_col_types = FALS
 if ("log2FoldChange_unshrunken" %in% colnames(results_deseq2)) {
   msg("  Using unshrunken log2FoldChange for comparison")
   results_deseq2 <- results_deseq2 %>%
+    select(-log2FoldChange) %>%
     rename(log2FoldChange = log2FoldChange_unshrunken)
 } else if (!"log2FoldChange" %in% colnames(results_deseq2)) {
   stop("DESeq2 results must contain 'log2FoldChange' or 'log2FoldChange_unshrunken'")
